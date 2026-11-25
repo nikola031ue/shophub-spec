@@ -1,0 +1,26 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+TestResults/
+# Built Angular output (filled by `ng build` and the image build)
+src/ShopHub.Api/wwwroot/
+# Node / Angular
+node_modules/
+.angular/
+coverage/
+dist/
+out-tsc/
+npm-debug.log*
+# Editors and OS
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+# Local environment and secrets (never commit)
+.env*
+*.pfx
+*.key
