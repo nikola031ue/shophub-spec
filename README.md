@@ -4,8 +4,21 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: accounts API and Kubernetes gateway. The panel's shop pages and the Angular sign-in pages
-come next.
+Status: accounts API, Kubernetes gateway, and the panel's sign-in and registration pages. The shop
+pages come next.
+
+## Run locally
+
+To click through the panel in a browser, with Docker:
+
+```sh
+docker compose up -d --build   # PostgreSQL + this checkout's image
+# open http://localhost:8080
+docker compose down -v         # stop and delete the local database
+```
+
+The local database trusts every connection on the compose network and publishes no port; it is for
+trying the pages only. There is no cluster, so shop pages answer 503 here.
 
 ## Settings
 
@@ -40,6 +53,25 @@ checks or sets a password does exactly one PBKDF2 run, and an unknown email is v
 fixed dummy hash, so neither the answer nor its timing tells a taken email from a free one. Known
 limit: without email verification, registering an email and then signing in with that password
 shows whether it was taken (both steps are rate-limited or locked out).
+
+## Panel pages (Angular)
+
+`src/ShopHub.Web/src/app/auth/`:
+
+- **Register** (`/register`): the API answers 202 whether or not the email is taken, so the page
+  always goes on to sign in with the same email and password. If that sign-in gets 401, the page
+  says only "If you already have an account, sign in with its password." It never says that the
+  email is taken; the tests check the wording and that a new and a taken email give the same page.
+- **Sign in** (`/signin`): one text for a wrong password and an unknown email; a lockout says how
+  many minutes to wait. After sign-in it returns to the page that asked for it (same-site paths
+  only).
+- **Sign out**: in the header; ends this session only.
+- **Guards**: owner pages need a session (otherwise sign-in, then back); a signed-in owner skips
+  sign-in and registration.
+- **XSRF** (`interceptors.ts`): every state-changing `/api` request sends `X-XSRF-TOKEN`. A missing
+  token is fetched from `/api/session` first; a stale one (the session ended on the server) is
+  replaced once on the API's XSRF 400. Any other 401 means the session ended: the panel goes to
+  sign-in.
 
 ## Security building blocks
 

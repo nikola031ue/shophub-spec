@@ -1,5 +1,11 @@
-<header>
+<header class="site-header">
   <h1>ShopHub</h1>
+  @if (auth.signedIn()) {
+    <div class="account">
+      <span class="muted">{{ auth.email() }}</span>
+      <button type="button" class="secondary" (click)="signOut()">Sign out</button>
+    </div>
+  }
 </header>
 <main>
   <router-outlet />
