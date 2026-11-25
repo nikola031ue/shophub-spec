@@ -188,14 +188,29 @@ public sealed class StartupTests(PostgresContainer db) : IClassFixture<PostgresC
         }
     }
 
+    /// <summary>
+    /// The start fails and the settings error names the variable. WebApplicationFactory sometimes
+    /// reports the disposed host (ObjectDisposedException) instead of the start error: it races the
+    /// failed host's disposal (seen once in CI). The host has logged the error by then, so the test
+    /// accepts either exception and finds the message in the exception chain or in the log.
+    /// </summary>
     [Fact]
     public void MissingDatabaseUrlStopsTheStartAndNamesIt()
     {
-        using var app = new ShopHubApp(new Dictionary<string, string?>());
+        var logs = new LogSink();
+        using var app = new ShopHubApp(new Dictionary<string, string?>(), logs);
 
-        var ex = Assert.Throws<SettingsException>(() => app.CreateClient());
+        var ex = Assert.ThrowsAny<Exception>(() => app.CreateClient());
 
-        Assert.Contains("DATABASE_URL is not set", ex.Message, StringComparison.Ordinal);
+        var chain = new List<Exception>();
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            chain.Add(e);
+        }
+
+        Assert.True(chain.Exists(e => e is SettingsException or ObjectDisposedException), ex.ToString());
+        var reported = chain.OfType<SettingsException>().FirstOrDefault()?.Message ?? string.Join(Environment.NewLine, logs.Lines);
+        Assert.Contains("DATABASE_URL is not set", reported, StringComparison.Ordinal);
     }
 
     /// <summary>A wrong database password keeps the app from opening its port; the logs name the problem, never the password.</summary>
