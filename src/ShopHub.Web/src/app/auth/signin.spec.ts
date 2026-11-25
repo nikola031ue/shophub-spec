@@ -51,14 +51,14 @@ describe('SignIn', () => {
   }
 
   it('signs in, loads the session and follows a same-site return URL', async () => {
-    await submit('/shops/s7k2m9qxa1');
+    await submit('/shops/s7k2m4qxab');
     http.expectOne({ method: 'POST', url: '/api/signin' }).flush(null, { status: 204, statusText: 'No Content' });
     await settle();
     answerSession(http, 'owner@example.test');
     await settle();
 
     expect(TestBed.inject(AuthApi).email()).toBe('owner@example.test');
-    expect(router.navigateByUrl).toHaveBeenCalledWith('/shops/s7k2m9qxa1');
+    expect(router.navigateByUrl).toHaveBeenCalledWith('/shops/s7k2m4qxab');
   });
 
   it('ignores a return URL to another site', async () => {

@@ -4,8 +4,8 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: accounts API, Kubernetes gateway, and the panel's sign-in and registration pages. The shop
-pages come next.
+Status: accounts API, Kubernetes gateway, the panel's sign-in and registration pages, and shop
+records. The reconciler, shop endpoints and shop pages come next.
 
 ## Run locally
 
@@ -95,6 +95,28 @@ Ported from the shop app (shop 0.2.0) with their tests, and adapted to many acco
 - **Rate limits** (`Auth/RateLimits.cs`): registration per client address, held per replica.
 - **Headers**: every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Content-Security-Policy: frame-ancestors 'none'` and `Referrer-Policy: same-origin`.
+
+## Shop records
+
+`Shops/ShopRecords.cs`, table `shops` (one row per shop, the source of truth the reconciler
+applies to the cluster):
+
+- **Validation**:
+  - name: trimmed, 1 to 100 characters (Unicode code points, as PostgreSQL and the Shop CRD count
+    them), no control characters; unique per owner ignoring letter case and surrounding spaces;
+  - availability `standard` or `high`; database `standard` or `light`;
+  - wallet address `0x` + 40 hex digits. All-lowercase or all-uppercase is accepted; mixed case
+    must pass the EIP-55 checksum (`Shops/Eip55.cs`, same rule as shop-operator). It is stored in
+    checksummed form.
+- **Ids**: `s` + 9 random base32 characters (`a-z`, `2-7`), drawn again on a collision.
+- **Create** runs in one transaction under a row lock on the owner, so any number of concurrent
+  requests and replicas behave as if one at a time:
+  - the same create again (same name, settings and wallet, shop not being deleted) returns the
+    existing shop and inserts nothing, so a double submit or retry makes one shop;
+  - the same name with other letter case or other settings is a duplicate name;
+  - an owner with 5 shops in any state, including ones being deleted, gets the limit.
+- **Owner filter**: every owner-facing query takes the owner id. Another owner's shop and a missing
+  one look the same.
 
 ## Kubernetes access
 

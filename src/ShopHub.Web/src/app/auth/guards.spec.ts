@@ -9,7 +9,7 @@ describe('guards', () => {
   let http: HttpTestingController;
   let router: Router;
   const route = {} as ActivatedRouteSnapshot;
-  const state = { url: '/shops/s7k2m9qxa1' } as RouterStateSnapshot;
+  const state = { url: '/shops/s7k2m4qxab' } as RouterStateSnapshot;
 
   beforeEach(() => {
     TestBed.configureTestingModule({
@@ -35,7 +35,7 @@ describe('guards', () => {
     const result = run(ownerGuard);
     await settle();
     answerSession(http, null);
-    expect(router.serializeUrl((await result) as UrlTree)).toBe('/signin?returnUrl=%2Fshops%2Fs7k2m9qxa1');
+    expect(router.serializeUrl((await result) as UrlTree)).toBe('/signin?returnUrl=%2Fshops%2Fs7k2m4qxab');
   });
 
   it('ownerGuard treats an unreachable API as signed out', async () => {
