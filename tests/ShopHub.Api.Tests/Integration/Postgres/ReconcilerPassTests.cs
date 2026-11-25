@@ -128,6 +128,74 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
         Assert.Single(gateway.Applied);
     }
 
+    /// <summary>
+    /// One pooled connection only, so the pass after a crash reuses the very connection the crashed
+    /// pass held: a lock that outlived its pass (a session lock without unlock) would show here.
+    /// </summary>
+    private NpgsqlDataSource SingleConnectionSource(string applicationName)
+    {
+        var source = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(_connectionString)
+        {
+            MaxPoolSize = 1,
+            ApplicationName = applicationName,
+        }.ConnectionString);
+        _sources.Add(source);
+        return source;
+    }
+
+    private async Task<long> AdvisoryLocksHeldAsync()
+    {
+        await using var conn = await Source().OpenConnectionAsync(Ct);
+        await using var cmd = new NpgsqlCommand("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'", conn);
+        return (long)(await cmd.ExecuteScalarAsync(Ct))!;
+    }
+
+    [Fact]
+    public async Task APassAfterACancelledPassStillRuns()
+    {
+        await CreateAsync("A");
+        var gateway = new FakeGateway();
+        var reconciler = new Reconciler(SingleConnectionSource("rec-cancel"), Store, () => gateway.Resolve(),
+            new ReconcileTrigger(), NullLogger<Reconciler>.Instance);
+
+        // The pass is stopped mid-apply, holding the lock (host shutdown, request aborted).
+        using var crash = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        gateway.BeforeApply = async ct =>
+        {
+            Assert.Equal(1, await AdvisoryLocksHeldAsync());
+            await crash.CancelAsync();
+            ct.ThrowIfCancellationRequested();
+        };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reconciler.RunOnceAsync(crash.Token));
+        gateway.BeforeApply = null;
+
+        Assert.Equal(0, await AdvisoryLocksHeldAsync());
+        Assert.Equal(new ReconcilePass(true, 1, 0), await reconciler.RunOnceAsync(Ct));
+    }
+
+    [Fact]
+    public async Task APassAfterAPassWhoseConnectionDiedStillRuns()
+    {
+        await CreateAsync("A");
+        var gateway = new FakeGateway();
+        var reconciler = new Reconciler(SingleConnectionSource("rec-killed"), Store, () => gateway.Resolve(),
+            new ReconcileTrigger(), NullLogger<Reconciler>.Instance);
+
+        // Mid-pass, the database side of the pass's connection goes away (failover, network cut).
+        gateway.BeforeApply = async _ =>
+        {
+            await using var admin = await Source().OpenConnectionAsync(Ct);
+            await using var kill = new NpgsqlCommand(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'rec-killed'", admin);
+            await kill.ExecuteNonQueryAsync(Ct);
+        };
+        await Assert.ThrowsAnyAsync<Exception>(() => reconciler.RunOnceAsync(Ct));
+        gateway.BeforeApply = null;
+
+        Assert.Equal(0, await AdvisoryLocksHeldAsync());
+        Assert.Equal(new ReconcilePass(true, 1, 0), await reconciler.RunOnceAsync(Ct));
+    }
+
     [Fact]
     public async Task SeveralWakesBeforeAPassGiveOnePass()
     {
@@ -174,6 +242,9 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
 
         public TimeSpan Delay { get; init; }
 
+        /// <summary>Runs before each apply; lets a test crash the pass at that point.</summary>
+        public Func<CancellationToken, Task>? BeforeApply { get; set; }
+
         public IReadOnlyList<ShopResources> Applied => [.. _applied];
 
         public int Resolutions => _resolutions;
@@ -186,6 +257,11 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
 
         public async Task ApplyAsync(ShopResources shop, CancellationToken ct)
         {
+            if (BeforeApply is { } hook)
+            {
+                await hook(ct);
+            }
+
             await Task.Delay(Delay, ct);
             if (shop.Id == FailFor)
             {
