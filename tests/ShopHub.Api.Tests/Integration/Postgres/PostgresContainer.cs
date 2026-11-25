@@ -27,6 +27,17 @@ public sealed class PostgresContainer : IAsyncLifetime
 
     public async ValueTask DisposeAsync() => await _container.DisposeAsync();
 
+    /// <summary>The CNPG-style URI ShopHub gets as <c>DATABASE_URL</c>.</summary>
+    public string DatabaseUrl(string database, string? password = null) =>
+        $"postgresql://postgres:{password ?? Password}@{_container.Hostname}:{_container.GetMappedPublicPort(5432)}/{database}";
+
+    /// <summary>Creates an empty database and returns its <c>DATABASE_URL</c>.</summary>
+    public async Task<string> CreateDatabaseUrlAsync(string name)
+    {
+        await CreateDatabaseAsync(name);
+        return DatabaseUrl(name);
+    }
+
     /// <summary>Creates an empty database and returns an Npgsql connection string for it.</summary>
     public async Task<string> CreateDatabaseAsync(string name)
     {

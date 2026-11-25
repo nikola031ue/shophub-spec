@@ -1,16 +1,22 @@
 // ShopHub (spec 004). One image serves the API under /api and the Angular app from /.
+using Npgsql;
 using ShopHub.Api;
 using ShopHub.Api.Auth;
+using ShopHub.Api.Storage.Postgres;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(sp => Settings.Load(sp.GetRequiredService<IConfiguration>()));
+builder.Services.AddSingleton(sp => NpgsqlDataSource.Create(sp.GetRequiredService<Settings>().PostgresConnectionString));
+// First hosted service: the schema is in place before anything else starts or the port opens.
+builder.Services.AddHostedService<DatabaseInitializer>();
+builder.Services.AddSingleton<ILockoutStore, PostgresLockoutStore>();
 builder.Services.AddProblemDetails();
 builder.Services.AddTrustedProxies();
 builder.Services.AddRateLimits();
 builder.Services.Configure<CookiePolicyOptions>(o => o.Secure = CookieSecurePolicy.Always);
-// Sessions (Auth/Sessions.cs) and the lockout store are wired with the account endpoints (T015).
+// Sessions (Auth/Sessions.cs) are wired with the account endpoints (T015).
 
 var app = builder.Build();
 
@@ -23,7 +29,13 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseRateLimiter();
 
-app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
+// For local checks and the chart's probes: answers only while the database does (503 otherwise).
+app.MapGet("/healthz", async (NpgsqlDataSource db, CancellationToken ct) =>
+{
+    await using var cmd = db.CreateCommand("SELECT 1");
+    await cmd.ExecuteScalarAsync(ct);
+    return Results.Ok(new { status = "ok" });
+});
 
 // Unknown API paths are 404s; every other path is a client route of the Angular app.
 app.MapFallback("/api/{**path}", () => Results.Problem(statusCode: StatusCodes.Status404NotFound));
