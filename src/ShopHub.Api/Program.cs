@@ -1,7 +1,9 @@
 // ShopHub (spec 004). One image serves the API under /api and the Angular app from /.
+using k8s;
 using Npgsql;
 using ShopHub.Api;
 using ShopHub.Api.Auth;
+using ShopHub.Api.Shops;
 using ShopHub.Api.Storage.Postgres;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,6 +14,13 @@ builder.Services.AddSingleton(sp => NpgsqlDataSource.Create(sp.GetRequiredServic
 // First hosted service: the schema is in place before anything else starts or the port opens.
 builder.Services.AddHostedService<DatabaseInitializer>();
 builder.Services.AddSingleton<ILockoutStore, PostgresLockoutStore>();
+// In the cluster: the pod's ServiceAccount (RBAC in the shophub chart). Elsewhere: the kubeconfig.
+// Created on first use, so the app starts without a cluster.
+builder.Services.AddSingleton<IKubernetes>(_ => new Kubernetes(KubernetesClientConfiguration.IsInCluster()
+    ? KubernetesClientConfiguration.InClusterConfig()
+    : KubernetesClientConfiguration.BuildConfigFromConfigFile()));
+builder.Services.AddSingleton<IKubeGateway>(sp =>
+    new KubeGateway(sp.GetRequiredService<IKubernetes>(), sp.GetRequiredService<Settings>().ShopsNamespace));
 builder.Services.AddProblemDetails();
 builder.Services.AddTrustedProxies();
 builder.Services.AddRateLimits();
