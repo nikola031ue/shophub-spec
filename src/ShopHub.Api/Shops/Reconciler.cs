@@ -36,10 +36,15 @@ public sealed record ReconcilePass(bool Ran, int Applied, int Failed);
 /// applies the DiscordChannel, current Wallet and Shop of every <c>Active</c> record, in that order.
 /// That one step creates, finishes an interrupted create and repairs drift alike.
 /// <para>
+/// After a wallet change (FR-009) the same step creates Wallet <c>-w&lt;new&gt;</c> and points the
+/// Shop at it; only then are the older generations still recorded as possibly present deleted, each
+/// by name, and the record notes them as gone. The operator keeps a Wallet while a Shop still uses
+/// it (002 <c>InUse</c>), so the delete can't take a Wallet from under a running shop.
+/// </para>
+/// <para>
 /// It works only from records and by exact names: it never lists or selects cluster objects, so
 /// an object without a record is never touched. One shop failing doesn't stop the others; it is
-/// retried on the next pass. Records in state <c>Deleting</c> are not applied (deletion is T022);
-/// old Wallet generations are removed with the wallet change (T021).
+/// retried on the next pass. Records in state <c>Deleting</c> are not applied (deletion is T022).
 /// </para>
 /// </summary>
 public sealed partial class Reconciler(
@@ -108,6 +113,7 @@ public sealed partial class Reconciler(
                 try
                 {
                     await kube.ApplyAsync(Resources(record), ct);
+                    await DeleteOldWalletsAsync(kube, record, ct);
                     applied++;
                 }
                 catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -120,6 +126,26 @@ public sealed partial class Reconciler(
 
         await tx.CommitAsync(ct);
         return new ReconcilePass(true, applied, failed);
+    }
+
+    /// <summary>
+    /// Generations <c>oldest</c> … <c>current-1</c>, after the Shop already points at the current one.
+    /// Missing is fine (an interrupted pass may have deleted some); the record is updated last, so a
+    /// crash in between only repeats deletes of names that are already gone.
+    /// </summary>
+    private async Task DeleteOldWalletsAsync(IKubeGateway kube, ShopRecord record, CancellationToken ct)
+    {
+        if (record.OldestWalletGeneration >= record.WalletGeneration)
+        {
+            return;
+        }
+
+        for (var g = record.OldestWalletGeneration; g < record.WalletGeneration; g++)
+        {
+            await kube.DeleteWalletAsync(record.Id, g, ct);
+        }
+
+        await shops.MarkOldWalletsDeletedAsync(record.Id, record.WalletGeneration, ct);
     }
 
     public static ShopResources Resources(ShopRecord r) =>

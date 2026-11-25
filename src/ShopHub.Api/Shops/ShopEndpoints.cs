@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using ShopHub.Api.Auth;
 
 namespace ShopHub.Api.Shops;
@@ -5,7 +6,7 @@ namespace ShopHub.Api.Shops;
 /// <summary>
 /// Shop API (contracts/panel-api.md "Shops", FR-005 to FR-011, FR-016). Every handler takes the
 /// owner from the session and reads the record through that owner: another owner's shop and a
-/// missing one get the identical 404. Change and delete come with US4 and US5.
+/// missing one get the identical 404. Delete comes with US5.
 /// </summary>
 public static class ShopEndpoints
 {
@@ -37,6 +38,7 @@ public static class ShopEndpoints
         shops.MapGet("", ListAsync);
         shops.MapPost("", CreateAsync).RequireXsrf();
         shops.MapGet("/{id}", GetAsync);
+        shops.MapPatch("/{id}", UpdateAsync).RequireXsrf();
         shops.MapPost("/{id}/admin-password", AdminPasswordAsync).RequireXsrf();
         return app;
     }
@@ -127,6 +129,39 @@ public static class ShopEndpoints
         }
 
         return Results.Ok(ToDto(record, await StatusAsync(kube, record, ct), time.GetUtcNow()));
+    }
+
+    /// <summary>
+    /// FR-012: availability and/or wallet address. The body is read as a plain JSON object so that
+    /// <c>name</c> and <c>database</c> are refused whenever they appear, not only when they differ.
+    /// Ownership is checked before anything about the request is answered beyond its shape, and a
+    /// repeat of the current values answers 200 without writing. The reconciler, woken on a change,
+    /// applies it (and for a new wallet: new Wallet, Shop repointed, old Wallet deleted, FR-009).
+    /// </summary>
+    private static async Task<IResult> UpdateAsync(
+        string id, JsonObject? body, HttpContext context, IShopStore store, IKubeGateway kube, ReconcileTrigger trigger,
+        TimeProvider time, CancellationToken ct)
+    {
+        var change = ShopRules.ValidateChange(body, out var problems);
+        if (change is null)
+        {
+            return Results.ValidationProblem(problems);
+        }
+
+        var now = time.GetUtcNow();
+        var result = await store.UpdateAsync(Owner(context), id, change, now, ct);
+        switch (result.Outcome)
+        {
+            case UpdateOutcome.NotFound:
+                return NotFound();
+            case UpdateOutcome.Deleting:
+                return Conflict(ShopMessages.BeingDeleted, "deleting");
+            case UpdateOutcome.Updated:
+                trigger.Wake();
+                break;
+        }
+
+        return Results.Ok(ToDto(result.Shop!, await StatusAsync(kube, result.Shop!, ct), now));
     }
 
     /// <summary>

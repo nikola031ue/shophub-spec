@@ -2,6 +2,7 @@ import { Component, InjectionToken, OnDestroy, OnInit, inject, signal } from '@a
 import { problemMessage } from '../shared/api';
 import { AdminPassword } from './admin-password';
 import { ShopCreate } from './shop-create';
+import { ShopEdit } from './shop-edit';
 import { AVAILABILITY_LABELS, DATABASE_LABELS, STATE_LABELS, Shop, ShopsApi } from './shops-api';
 
 /** FR-008 asks for at least every 10 s while a shop is not ready; research R13 chose 5 s. */
@@ -10,13 +11,13 @@ export const REFRESH_INTERVAL_MS = new InjectionToken<number>('REFRESH_INTERVAL_
 });
 
 /**
- * The owner's shops (FR-008) and the create form. While any shop is not ready the list reloads on
+ * The owner's shops (FR-008) with "Change settings" (FR-012), and the create form. While any shop is not ready the list reloads on
  * its own; once all are ready it stops. Storefront links open in a new tab without access to the
  * panel window (FR-010).
  */
 @Component({
   selector: 'app-shop-list',
-  imports: [AdminPassword, ShopCreate],
+  imports: [AdminPassword, ShopCreate, ShopEdit],
   template: `
     <section class="card">
       <h2>Your shops</h2>
@@ -58,6 +59,9 @@ export const REFRESH_INTERVAL_MS = new InjectionToken<number>('REFRESH_INTERVAL_
             </dl>
             @if (isOpenable(shop)) {
               <app-admin-password [shop]="shop" />
+            }
+            @if (shop.state !== 'deleting') {
+              <app-shop-edit [shop]="shop" (saved)="reload()" />
             }
           </li>
         }

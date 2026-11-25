@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 using ShopHub.Api.Shops;
 
 namespace ShopHub.Api.Tests.Unit;
@@ -152,5 +153,40 @@ public sealed class ShopRulesTests
         Assert.Equal(ids.Count, ids.Distinct().Count());
         // Every character of the alphabet shows up, so none is accidentally excluded.
         Assert.Equal(32, ids.SelectMany(id => id[1..]).Distinct().Count());
+    }
+
+    private static JsonObject Body(string json) => JsonNode.Parse(json)!.AsObject();
+
+    [Theory]
+    [InlineData("""{"availability":"high"}""", "high", null)]
+    [InlineData("""{"walletAddress":"0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359"}""", null, "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359")]
+    [InlineData("""{"availability":"standard","walletAddress":" 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed "}""", "standard", Valid)]
+    public void AChangeTakesAvailabilityAndOrAWalletAddressInEip55Form(string json, string? availability, string? wallet)
+    {
+        Assert.Equal(new ShopChange(availability, wallet), ShopRules.ValidateChange(Body(json), out var problems));
+        Assert.Empty(problems);
+    }
+
+    [Theory]
+    [InlineData("""{"name":"Acme"}""", "name", ShopRules.ReadOnlyProblem)]
+    [InlineData("""{"database":"standard"}""", "database", ShopRules.ReadOnlyProblem)]
+    [InlineData("""{"availability":"high","database":null}""", "database", ShopRules.ReadOnlyProblem)]
+    [InlineData("""{"availability":"high","replicas":3}""", "replicas", ShopRules.UnknownFieldProblem)]
+    [InlineData("""{"availability":"medium"}""", "availability", ShopRules.AvailabilityProblem)]
+    [InlineData("""{"availability":3}""", "availability", ShopRules.AvailabilityProblem)]
+    [InlineData("""{"availability":null}""", "availability", ShopRules.AvailabilityProblem)]
+    [InlineData("""{"walletAddress":"0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAEd"}""", "walletAddress", Eip55.ChecksumProblem)]
+    [InlineData("""{}""", "", ShopRules.NothingToChangeProblem)]
+    public void NameDatabaseUnknownFieldsBadValuesAndEmptyChangesAreRefusedByField(string json, string field, string problem)
+    {
+        Assert.Null(ShopRules.ValidateChange(Body(json), out var problems));
+        Assert.Equal([problem], problems[field]);
+    }
+
+    [Fact]
+    public void AMissingBodyIsNothingToChange()
+    {
+        Assert.Null(ShopRules.ValidateChange(null, out var problems));
+        Assert.Equal([ShopRules.NothingToChangeProblem], problems[""]);
     }
 }

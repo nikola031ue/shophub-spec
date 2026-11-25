@@ -151,7 +151,7 @@ public sealed class StartupTests(PostgresContainer db) : IClassFixture<PostgresC
         Assert.Equal(HttpStatusCode.OK, health.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
         Assert.Equal("application/problem+json", unknown.Content.Headers.ContentType?.MediaType);
-        Assert.Equal([1, 2], await AppliedVersionsAsync(app));
+        Assert.Equal([1, 2, 3], await AppliedVersionsAsync(app));
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public sealed class StartupTests(PostgresContainer db) : IClassFixture<PostgresC
         try
         {
             await Task.WhenAll(apps.Select(a => Task.Run(() => a.CreateClient().Dispose(), Ct)));
-            Assert.Equal([1, 2], await AppliedVersionsAsync(apps[0]));
+            Assert.Equal([1, 2, 3], await AppliedVersionsAsync(apps[0]));
         }
         finally
         {

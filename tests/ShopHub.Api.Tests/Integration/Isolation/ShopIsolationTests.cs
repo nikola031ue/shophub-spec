@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json.Nodes;
 using ShopHub.Api.Tests.Integration.Postgres;
 using static ShopHub.Api.Tests.Integration.Owners;
 
@@ -7,15 +8,16 @@ namespace ShopHub.Api.Tests.Integration.Isolation;
 /// <summary>
 /// FR-005, FR-018, SC-004 (quickstart Scenario 7): owner B, naming owner A's shop on every shop
 /// endpoint, gets exactly the 404 of an unknown id, and nothing of A's is read from the cluster on
-/// B's behalf. A's shops are not in B's list. T021 and T022 add PATCH and DELETE to the matrix.
+/// B's behalf, and nothing of A's changes. A's shops are not in B's list. T022 adds DELETE to the matrix.
 /// </summary>
 public sealed class ShopIsolationTests(PostgresContainer db) : IClassFixture<PostgresContainer>
 {
-    /// <summary>Every endpoint that names a shop, as (method, path template, body).</summary>
-    public static TheoryData<string, string> Endpoints => new()
+    /// <summary>Every endpoint that names a shop, as (method, path template, JSON body or null).</summary>
+    public static TheoryData<string, string, string?> Endpoints => new()
     {
-        { "GET", "/api/shops/{id}" },
-        { "POST", "/api/shops/{id}/admin-password" },
+        { "GET", "/api/shops/{id}", null },
+        { "POST", "/api/shops/{id}/admin-password", null },
+        { "PATCH", "/api/shops/{id}", """{"availability":"high","walletAddress":"0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"}""" },
     };
 
     private async Task<(ShopHubApp App, FakeKube Kube, BrowserClient A, BrowserClient B, string ShopOfA)> SetUpAsync()
@@ -37,17 +39,20 @@ public sealed class ShopIsolationTests(PostgresContainer db) : IClassFixture<Pos
 
     [Theory]
     [MemberData(nameof(Endpoints))]
-    public async Task AnotherOwnersShopGetsTheSame404AsAnUnknownId(string method, string template)
+    public async Task AnotherOwnersShopGetsTheSame404AsAnUnknownId(string method, string template, string? body)
     {
         var (app, kube, a, b, shopOfA) = await SetUpAsync();
         using var _app = app;
         using var _a = a;
         using var _b = b;
         var verb = new HttpMethod(method);
+        JsonNode? Body() => body is null ? null : JsonNode.Parse(body);
+        using var before = await a.SendAsync(HttpMethod.Get, $"/api/shops/{shopOfA}");
+        var shopBefore = (await ReadAsync(before))!.ToJsonString();
         var readsBefore = (kube.StatusReads.Count, kube.SecretReads.Count, kube.Probes.Count);
 
-        using var foreign = await b.SendAsync(verb, template.Replace("{id}", shopOfA, StringComparison.Ordinal));
-        using var unknown = await b.SendAsync(verb, template.Replace("{id}", "s7k2m4qxab", StringComparison.Ordinal));
+        using var foreign = await b.SendAsync(verb, template.Replace("{id}", shopOfA, StringComparison.Ordinal), Body());
+        using var unknown = await b.SendAsync(verb, template.Replace("{id}", "s7k2m4qxab", StringComparison.Ordinal), Body());
 
         Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
@@ -55,9 +60,11 @@ public sealed class ShopIsolationTests(PostgresContainer db) : IClassFixture<Pos
         Assert.Equal(
             unknown.Content.Headers.ContentType?.ToString(), foreign.Content.Headers.ContentType?.ToString());
         Assert.Equal(readsBefore, (kube.StatusReads.Count, kube.SecretReads.Count, kube.Probes.Count));
+        using var after = await a.SendAsync(HttpMethod.Get, $"/api/shops/{shopOfA}");
+        Assert.Equal(shopBefore, (await ReadAsync(after))!.ToJsonString());
 
         // A still reaches the same endpoint (so the 404 above is about ownership, not the route).
-        using var own = await a.SendAsync(verb, template.Replace("{id}", shopOfA, StringComparison.Ordinal));
+        using var own = await a.SendAsync(verb, template.Replace("{id}", shopOfA, StringComparison.Ordinal), Body());
         Assert.Equal(HttpStatusCode.OK, own.StatusCode);
     }
 

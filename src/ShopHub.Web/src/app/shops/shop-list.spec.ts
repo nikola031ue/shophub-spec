@@ -124,6 +124,34 @@ describe('ShopList (FR-008, FR-010)', () => {
     fixture.destroy();
   });
 
+  it('offers "Change settings" except for shops being deleted, and reloads after a save', async () => {
+    configure();
+    const deleting = preparing({ id: 's3del33333', name: 'Old', state: 'deleting', reason: null });
+    const fixture = await render([shop(), deleting]);
+    const changeButton = (id: string) =>
+      [...el(fixture).querySelectorAll(`[data-shop=${id}] button`)].find((b) => b.textContent?.includes('Change settings'));
+
+    expect(changeButton('s7k2m4qxab')).toBeDefined();
+    expect(changeButton('s3del33333')).toBeUndefined();
+
+    (changeButton('s7k2m4qxab') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    const select = el(fixture).querySelector<HTMLSelectElement>('[data-shop=s7k2m4qxab] select[name=availability]')!;
+    select.value = 'high';
+    select.dispatchEvent(new Event('change'));
+    await fixture.whenStable();
+    el(fixture).querySelector('[data-shop=s7k2m4qxab] form')!.dispatchEvent(new Event('submit'));
+    await wait(0);
+    http.expectOne({ method: 'PATCH', url: '/api/shops/s7k2m4qxab' }).flush(shop({ availability: 'high' }));
+    await wait(0);
+
+    http.expectOne({ method: 'GET', url: '/api/shops' }).flush({ shops: [shop({ availability: 'high' }), deleting] });
+    await wait(0);
+    await fixture.whenStable();
+    expect(el(fixture).querySelector('[data-shop=s7k2m4qxab]')!.textContent).toContain('High (3 copies)');
+    fixture.destroy();
+  });
+
   it('says so when there are no shops yet', async () => {
     configure(60_000);
     const fixture = await render([]);
