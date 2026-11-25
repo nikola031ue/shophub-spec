@@ -4,9 +4,9 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: accounts API, Kubernetes gateway, the panel's sign-in and registration pages, shop records,
-the reconciler and the shop API (list, create, read, admin password). The shop pages, change and
-delete come next.
+Status: accounts, shop records, the reconciler, the shop API and the panel's pages for signing in,
+listing, creating and opening shops and showing a shop's admin password. Change and delete come
+next.
 
 ## Run locally
 
@@ -97,6 +97,20 @@ shows whether it was taken (both steps are rate-limited or locked out).
   The password is in no other response and in no log line.
 - **503** when the database or the Kubernetes API doesn't answer. Create still works while the
   cluster is down: it writes only the record, and the reconciler applies it later.
+
+## Panel shop pages (Angular)
+
+`src/ShopHub.Web/src/app/shops/` (the start page for a signed-in owner):
+
+- **List:** each shop's name, state, plain-language reason, address, availability, database and
+  wallet. While any shop isn't ready, the list reloads every 5 s and stops once all are ready.
+- **Open:** a ready shop's name and address open the storefront in a new tab with
+  `rel="noopener noreferrer"`, so the tab gets no access to the panel.
+- **Create:** a form showing the API's field errors next to their fields, a duplicate name on the
+  name field, and the limit message.
+- **Show shop admin password:** fetched only on that click and dropped on "Hide". It comes with a
+  link to the shop's admin sign-in and the hint that the shop asks for a new password at the first
+  sign-in. Once the admin has changed it, the panel says so instead.
 
 ## Security building blocks
 
