@@ -4,7 +4,8 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: scaffold (Phase 2). Accounts, shops and the Kubernetes gateway come in the next phases.
+Status: foundation (settings, database start-up, schema). Accounts, shops and the Kubernetes
+gateway come in the next phases.
 
 ## Settings
 
@@ -13,11 +14,16 @@ message that names the variable, never its value.
 
 | Variable | Required | Meaning |
 |----------|----------|---------|
+| `DATABASE_URL` | ✓ | PostgreSQL URI, e.g. `postgresql://app:pw@host:5432/app` (CNPG Secret `shophub-db-app`, key `uri`) |
+| `SHOPS_NAMESPACE` | – | Namespace of the owners' Shops, Wallets and DiscordChannels; default `shops` |
+| `SHOP_DOMAIN` | – | Shop host suffix, for display only (URLs come from the Shop status); default `shops.localhost` |
+| `MAX_SHOPS_PER_OWNER` | – | Default 5 |
 | `TRUSTED_PROXY_HOST` | – | DNS name of the entry point's pods (`traefik-proxies.traefik.svc.cluster.local`). See [Client address](#client-address) |
 | `REGISTRATION_RATE_LIMIT_PER_HOUR` | – | Registrations per hour per client address; default 10 |
 
-`DATABASE_URL`, `SHOPS_NAMESPACE`, `SHOP_DOMAIN` and `MAX_SHOPS_PER_OWNER` arrive with the
-foundation phase (T013).
+At start the app applies its schema (`Storage/Postgres/Scripts/NNN_*.sql`, each once, under an
+advisory lock, so replicas can start together). Until the database answers it retries with
+backoff and does not open its port; `/healthz` answers only while the database does.
 
 ## Security building blocks
 
@@ -50,15 +56,18 @@ Requirements: .NET SDK (version in `global.json`), Node 24 (or 22), Docker.
 # Build the Angular app into src/ShopHub.Api/wwwroot
 (cd src/ShopHub.Web && npm ci && npx ng build)
 
+# A database
+docker run -d --name shophub-pg -p 5432:5432 -e POSTGRES_USER=app -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=app postgres:18.7
+
 # Run the API (serves the app on http://localhost:5080)
-dotnet run --project src/ShopHub.Api
+DATABASE_URL=postgresql://app:dev@localhost:5432/app dotnet run --project src/ShopHub.Api
 ```
 
 The image works the same way, on port 8080:
 
 ```bash
 docker build -t shophub:dev .
-docker run --rm -p 8080:8080 shophub:dev
+docker run --rm -p 8080:8080 -e DATABASE_URL=… shophub:dev
 ```
 
 ## Tests

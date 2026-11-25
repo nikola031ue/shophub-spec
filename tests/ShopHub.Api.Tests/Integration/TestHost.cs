@@ -33,6 +33,11 @@ public sealed class TestHost : IAsyncDisposable
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        // A syntactically valid DATABASE_URL: this host never connects to a database.
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["DATABASE_URL"] = "postgresql://app:pw@db.invalid:5432/app",
+        });
         builder.Configuration.AddInMemoryCollection(config ?? new Dictionary<string, string?>());
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton(sp => Settings.Load(sp.GetRequiredService<IConfiguration>()));

@@ -10,11 +10,7 @@ public sealed class ForwardedHeadersTests
 {
     private static Dictionary<string, string?> Env(string? proxyHost) => new()
     {
-        ["SHOP_NAME"] = "Acme",
-        ["WALLET_ADDRESS"] = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
-        ["ADMIN_PASSWORD"] = "admin-secret",
-        ["REDIS_URL"] = "redis://acme-redis.shops.svc:6379",
-        ["REDIS_PASSWORD"] = "redis-secret",
+        ["DATABASE_URL"] = "postgresql://app:pw@shophub-db-rw.shophub.svc:5432/app",
         ["TRUSTED_PROXY_HOST"] = proxyHost,
     };
 
