@@ -4,7 +4,10 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Identity;
 using Npgsql;
+using ShopHub.Api.Accounts;
 
 namespace ShopHub.Api.Tests.Integration.Postgres;
 
@@ -15,10 +18,20 @@ namespace ShopHub.Api.Tests.Integration.Postgres;
 public sealed class ShopHubApp(
     IReadOnlyDictionary<string, string?> env,
     LogSink? logs = null,
-    TimeSpan? startupTimeout = null) : WebApplicationFactory<Program>
+    TimeSpan? startupTimeout = null,
+    IPasswordHasher<OwnerUser>? hasher = null) : WebApplicationFactory<Program>
 {
+    /// <summary>TestServer has no peer address; this test-only header simulates the TCP peer.</summary>
+    public const string PeerHeader = "X-Test-Peer";
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        builder.ConfigureServices(s => s.AddSingleton<IStartupFilter, PeerFilter>());
+        if (hasher is not null)
+        {
+            builder.ConfigureServices(s => s.AddSingleton(hasher));
+        }
+
         foreach (var (key, value) in env)
         {
             builder.UseSetting(key, value);
@@ -34,6 +47,23 @@ public sealed class ShopHubApp(
             builder.ConfigureServices(s => s.Configure<HostOptions>(o => o.StartupTimeout = timeout));
         }
     }
+}
+
+internal sealed class PeerFilter : IStartupFilter
+{
+    public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+    {
+        app.Use((context, nextMiddleware) =>
+        {
+            if (System.Net.IPAddress.TryParse(context.Request.Headers[ShopHubApp.PeerHeader], out var ip))
+            {
+                context.Connection.RemoteIpAddress = ip;
+            }
+
+            return nextMiddleware(context);
+        });
+        next(app);
+    };
 }
 
 /// <summary>Collects every log message and exception text written by the app.</summary>
