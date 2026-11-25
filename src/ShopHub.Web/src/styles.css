@@ -1,0 +1,74 @@
+/* Plain CSS, no UI library (research R13). */
+:root {
+  --fg: #1d2330;
+  --muted: #5d6677;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --line: #dde1e8;
+  --accent: #2456c9;
+  --danger: #b42318;
+  --ok: #157f3b;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+body { margin: 0; }
+header { background: var(--card); border-bottom: 1px solid var(--line); padding: 0.75rem 1rem; }
+header h1 { margin: 0; font-size: 1.25rem; }
+main { max-width: 64rem; margin: 0 auto; padding: 1rem; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+.narrow { max-width: 24rem; }
+
+form label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; }
+input { font: inherit; padding: 0.45rem 0.6rem; border: 1px solid var(--line); border-radius: 6px; width: 100%; box-sizing: border-box; }
+button { font: inherit; padding: 0.45rem 0.9rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button:disabled { opacity: 0.6; cursor: default; }
+button.secondary { background: transparent; color: var(--accent); }
+button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+button.link { background: none; border: none; color: var(--accent); padding: 0; }
+form button[type='submit'] { margin-top: 1rem; }
+
+.error { color: var(--danger); margin: 0.25rem 0; }
+.success { color: var(--ok); }
+.notice { background: #fff6e0; border: 1px solid #f0d58c; border-radius: 6px; padding: 0.6rem 0.8rem; }
+.tag { margin-left: 0.5rem; font-size: 0.8rem; color: var(--muted); }
+
+.admin-nav { display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; }
+.admin-nav a { color: var(--fg); text-decoration: none; }
+.admin-nav a.active { font-weight: 700; text-decoration: underline; }
+.admin-nav .link { margin-left: auto; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.toolbar h2 { margin: 0 auto 0 0; }
+.search { display: flex; gap: 0.5rem; }
+.search button { margin-top: 0; }
+.item-form { border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 1rem 1rem; margin: 1rem 0; max-width: 28rem; }
+.actions { display: flex; gap: 0.5rem; }
+
+table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid var(--line); }
+tr.unavailable td { color: var(--muted); }
+.row-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+.pager { display: flex; gap: 1rem; align-items: center; justify-content: center; margin-top: 1rem; }
+
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Storefront */
+.site-header { display: flex; align-items: center; justify-content: space-between; }
+.site-header h1 a { color: var(--fg); text-decoration: none; }
+.cart-link { color: var(--accent); font-weight: 600; text-decoration: none; }
+.items { list-style: none; padding: 0; margin: 1rem 0 0; }
+.item { display: flex; gap: 1rem; align-items: center; padding: 0.6rem 0; border-bottom: 1px solid var(--line); }
+.item .name { flex: 1; }
+.item .price { min-width: 9rem; text-align: right; }
+.item.unavailable .name, .item.unavailable .price { color: var(--muted); }
+.qty { width: 5rem; }
+.checkout { margin-top: 1rem; }
+.reference { font-family: ui-monospace, monospace; font-size: 1.5rem; letter-spacing: 0.1em; }
+
+.mono { font-family: ui-monospace, monospace; }
+.muted { color: var(--muted); font-size: 0.9rem; }
+tr.lines > td { background: var(--bg); }
+tr.lines table { margin-top: 0; }
