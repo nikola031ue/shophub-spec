@@ -79,8 +79,8 @@ public sealed class K3sCluster : IAsyncLifetime
 
     public async ValueTask DisposeAsync() => await _container.DisposeAsync();
 
-    /// <summary>A client acting as ShopHub's ServiceAccount; every request is recorded in <paramref name="recorder"/>.</summary>
-    public IKubernetes AsShopHub(RequestRecorder? recorder = null)
+    /// <summary>A client acting as ShopHub's ServiceAccount, sending through <paramref name="handlers"/> (outermost first).</summary>
+    public IKubernetes AsShopHub(params DelegatingHandler[] handlers)
     {
         var config = new KubernetesClientConfiguration
         {
@@ -89,7 +89,7 @@ public sealed class K3sCluster : IAsyncLifetime
             SslCaCerts = _admin.SslCaCerts,
             SkipTlsVerify = _admin.SkipTlsVerify,
         };
-        return recorder is null ? new Kubernetes(config) : new Kubernetes(config, recorder);
+        return new Kubernetes(config, handlers);
     }
 
     /// <summary>Asks the API server whether ShopHub's ServiceAccount may do this (like <c>kubectl auth can-i --as</c>).</summary>

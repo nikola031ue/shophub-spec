@@ -43,6 +43,17 @@ builder.Services.AddSingleton<IKubernetes>(_ => new Kubernetes(KubernetesClientC
 builder.Services.AddSingleton<IKubeGateway>(sp =>
     new KubeGateway(sp.GetRequiredService<IKubernetes>(), sp.GetRequiredService<Settings>().ShopsNamespace));
 
+// Applies the shop records to the cluster (research R8). After the database initializer, so the
+// schema exists; the gateway is resolved only once there are records to apply.
+builder.Services.AddSingleton<ReconcileTrigger>();
+builder.Services.AddSingleton(sp => new Reconciler(
+    sp.GetRequiredService<NpgsqlDataSource>(),
+    sp.GetRequiredService<IShopStore>(),
+    sp.GetRequiredService<IKubeGateway>,
+    sp.GetRequiredService<ReconcileTrigger>(),
+    sp.GetRequiredService<ILogger<Reconciler>>()));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Reconciler>());
+
 builder.Services.AddProblemDetails();
 builder.Services.AddTrustedProxies();
 builder.Services.AddRateLimits();
