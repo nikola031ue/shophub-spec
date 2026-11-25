@@ -1,8 +1,5 @@
-header {
-  border-bottom: 1px solid #ddd;
-  padding: 0.5rem 1rem;
-}
-
-main {
-  padding: 1rem;
+.account {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
 }

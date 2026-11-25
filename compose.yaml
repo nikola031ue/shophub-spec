@@ -1,0 +1,32 @@
+# Local click-through of the panel (README "Run locally"): PostgreSQL plus the ShopHub image built
+# from this checkout, at http://localhost:8080. For trying the pages only, not for any shared use:
+# the database trusts every connection on the compose network and publishes no port, so there is
+# no password to keep. Browsers accept the app's Secure cookies on http://localhost.
+# No Kubernetes: shop pages that need the cluster (T017+) answer 503 here.
+name: shophub-local
+
+services:
+  db:
+    image: postgres:18.7
+    environment:
+      POSTGRES_DB: shophub
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "shophub"]
+      interval: 2s
+      retries: 30
+
+  shophub:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres@db:5432/shophub
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  db:
