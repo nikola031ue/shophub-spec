@@ -137,13 +137,14 @@ public static class ShopEndpoints
     private static async Task<IResult> AdminPasswordAsync(
         string id, HttpContext context, IShopStore store, IKubeGateway kube, IShopAdminProbe probe, CancellationToken ct)
     {
+        // Every answer of this endpoint, not only the one with the password, is kept out of caches.
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
         if (await store.GetAsync(Owner(context), id, ct) is not { } record)
         {
             return NotFound();
         }
 
-        context.Response.Headers.CacheControl = "no-store";
-        context.Response.Headers.Pragma = "no-cache";
         const string notReady = "The shop isn't ready yet. Try again when it is.";
         if (record.State == RecordState.Deleting || await kube.GetShopStatusAsync(record.Id, ct) is not { Ready: true })
         {

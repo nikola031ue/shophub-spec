@@ -280,6 +280,55 @@ public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresC
         Assert.DoesNotContain(logs.Lines, l => l.Contains(password, StringComparison.Ordinal));
     }
 
+    private static void AssertNotCacheable(HttpResponseMessage response)
+    {
+        Assert.True(response.Headers.CacheControl?.NoStore, $"no-store missing on {(int)response.StatusCode}");
+        Assert.Contains("no-cache", response.Headers.Pragma.Select(p => p.Name));
+    }
+
+    /// <summary>FR-016: no answer of the admin-password endpoint may be cached, whatever its status.</summary>
+    [Fact]
+    public async Task EveryAdminPasswordAnswerIsNoStoreAndNoCache()
+    {
+        var (app, kube, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme"))["id"]!;
+        var path = $"/api/shops/{id}/admin-password";
+        kube.SetAdminPassword(id, "gen-password");
+
+        using (var notReady = await owner.SendAsync(HttpMethod.Post, path))
+        {
+            Assert.Equal(HttpStatusCode.Conflict, notReady.StatusCode);
+            AssertNotCacheable(notReady);
+        }
+
+        kube.SetReady(id);
+        using (var given = await owner.SendAsync(HttpMethod.Post, path))
+        {
+            Assert.Equal(HttpStatusCode.OK, given.StatusCode);
+            AssertNotCacheable(given);
+        }
+
+        kube.SetPasswordChanged(id, null);
+        using (var silent = await owner.SendAsync(HttpMethod.Post, path))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, silent.StatusCode);
+            AssertNotCacheable(silent);
+        }
+
+        kube.SetPasswordChanged(id, true);
+        using (var changed = await owner.SendAsync(HttpMethod.Post, path))
+        {
+            Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
+            AssertNotCacheable(changed);
+        }
+
+        using var unknown = await owner.SendAsync(HttpMethod.Post, "/api/shops/s7k2m4qxab/admin-password");
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        AssertNotCacheable(unknown);
+    }
+
     [Fact]
     public async Task AShopThatDoesNotAnswerGives503AndAMissingSecret409()
     {
