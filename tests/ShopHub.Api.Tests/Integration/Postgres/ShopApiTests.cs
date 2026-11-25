@@ -8,7 +8,7 @@ namespace ShopHub.Api.Tests.Integration.Postgres;
 
 /// <summary>
 /// T019 shop API on PostgreSQL with a fake cluster (contracts/panel-api.md "Shops"): list, create,
-/// read, the admin-password hand-off (FR-016) and 503 when a dependency doesn't answer. Isolation
+/// read, change (T021), the admin-password hand-off (FR-016) and 503 when a dependency doesn't answer. Isolation
 /// between owners is in <c>Isolation/ShopIsolationTests</c>.
 /// </summary>
 public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresContainer>
@@ -411,5 +411,132 @@ public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresC
             await using var cmd = new Npgsql.NpgsqlCommand($"ALTER DATABASE \"{dbName}\" ALLOW_CONNECTIONS true", admin);
             await cmd.ExecuteNonQueryAsync(Ct);
         }
+    }
+
+    [Fact]
+    public async Task ChangeNeedsASignedInOwnerAndTheXsrfToken()
+    {
+        var (app, _, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme"))["id"]!;
+        using var anonymous = await BrowserAsync(app);
+
+        using (var response = await anonymous.SendAsync(HttpMethod.Patch, $"/api/shops/{id}", new { availability = "high" }))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Patch, $"/api/shops/{id}")
+        {
+            Content = System.Net.Http.Json.JsonContent.Create(new { availability = "high" }),
+        };
+        request.Headers.Add("Cookie", owner.Cookie("shophub.session"));
+        using (var response = await owner.Http.SendAsync(request, Ct))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+
+        Assert.Equal("standard", (string?)(await ListAsync(owner))[0]["availability"]);
+    }
+
+    [Fact]
+    public async Task ChangeAnswers200WithTheChangedShopAndWakesTheReconciler()
+    {
+        var (app, kube, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme"))["id"]!;
+        kube.SetReady(id);
+        for (var i = 0; i < 100 && !kube.Applied.Contains(id); i++)
+        {
+            await Task.Delay(50, Ct);
+        }
+
+        var appliedBefore = kube.Applied.Count;
+
+        using var response = await owner.SendAsync(HttpMethod.Patch, $"/api/shops/{id}",
+            new { availability = "high", walletAddress = GoodWallet.ToLowerInvariant() });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var shop = (await ReadAsync(response))!;
+        Assert.Equal((id, "Acme", "high", "standard", GoodWallet, 3),
+            ((string)shop["id"]!, (string)shop["name"]!, (string)shop["availability"]!, (string)shop["database"]!,
+             (string)shop["walletAddress"]!, (int)shop["replicas"]!));
+        Assert.Equal("ready", (string?)shop["state"]);
+        Assert.Equal(shop.ToJsonString(), (await ListAsync(owner))[0].ToJsonString());
+
+        for (var i = 0; i < 100 && kube.Applied.Count == appliedBefore; i++)
+        {
+            await Task.Delay(50, Ct);
+        }
+
+        Assert.True(kube.Applied.Count > appliedBefore);
+    }
+
+    [Fact]
+    public async Task RepeatingTheCurrentValuesAnswers200AndChangesNothing()
+    {
+        var (app, _, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var created = await CreateShopAsync(owner, "Acme");
+        var id = (string)created["id"]!;
+
+        using var response = await owner.SendAsync(HttpMethod.Patch, $"/api/shops/{id}",
+            new { availability = "standard", walletAddress = Wallet.ToUpperInvariant().Replace("0X", "0x", StringComparison.Ordinal) });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var shop = (await ReadAsync(response))!;
+        Assert.Equal(("standard", Wallet), ((string)shop["availability"]!, (string)shop["walletAddress"]!));
+        var store = app.Services.GetRequiredService<IShopStore>();
+        var record = (await store.ListAllForReconcilerAsync(Ct)).Single();
+        Assert.Equal((1, record.CreatedAt), (record.WalletGeneration, record.UpdatedAt));
+    }
+
+    [Fact]
+    public async Task NameDatabaseBadValuesAndEmptyChangesAre400AndChangeNothing()
+    {
+        var (app, _, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme"))["id"]!;
+
+        foreach (var (body, field) in new (object Body, string Field)[]
+                 {
+                     (new { availability = "high", name = "Renamed" }, "name"),
+                     (new { availability = "high", database = "standard" }, "database"),
+                     (new { availability = "medium" }, "availability"),
+                     (new { walletAddress = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAEd" }, "walletAddress"),
+                     (new { }, ""),
+                 })
+        {
+            using var response = await owner.SendAsync(HttpMethod.Patch, $"/api/shops/{id}", body);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.NotNull((await ReadAsync(response))!["errors"]![field]);
+        }
+
+        var shop = (await ListAsync(owner))[0];
+        Assert.Equal(("Acme", "standard", "standard", Wallet),
+            ((string)shop["name"]!, (string)shop["availability"]!, (string)shop["database"]!, (string)shop["walletAddress"]!));
+    }
+
+    [Fact]
+    public async Task AShopBeingDeletedCannotBeChanged()
+    {
+        var (app, _, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme"))["id"]!;
+        await using (var conn = await app.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync(Ct))
+        {
+            await ShopHub.Api.Storage.Postgres.Pg.ExecuteAsync(conn, "UPDATE shops SET state = 'Deleting' WHERE id = @id", Ct, ("id", id));
+        }
+
+        using var response = await owner.SendAsync(HttpMethod.Patch, $"/api/shops/{id}", new { availability = "high" });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("deleting", (string?)(await ReadAsync(response))!["reason"]);
+        Assert.Equal("standard", (string?)(await ListAsync(owner))[0]["availability"]);
     }
 }

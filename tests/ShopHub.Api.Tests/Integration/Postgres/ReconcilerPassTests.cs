@@ -75,6 +75,56 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
             gateway.Applied.OrderBy(r => r.Id, StringComparer.Ordinal));
     }
 
+    private Task<UpdateResult> ChangeWalletAsync(ShopRecord shop, string wallet) =>
+        Store.UpdateAsync(_owner, shop.Id, new ShopChange(null, wallet), T0, Ct);
+
+    /// <summary>FR-009: new Wallet and Shop first (one apply), then the old Wallet, once.</summary>
+    [Fact]
+    public async Task AfterAWalletChangeTheOldWalletIsDeletedAfterTheApplyAndOnlyOnce()
+    {
+        var shop = await CreateAsync("A");
+        var gateway = new FakeGateway();
+        await NewReconciler(gateway).RunOnceAsync(Ct);
+        await ChangeWalletAsync(shop, "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359");
+
+        Assert.Equal(new ReconcilePass(true, 1, 0), await NewReconciler(gateway).RunOnceAsync(Ct));
+        await NewReconciler(gateway).RunOnceAsync(Ct);
+
+        Assert.Equal(
+            [$"apply {shop.Id}-w1", $"apply {shop.Id}-w2", $"delete {shop.Id}-w1", $"apply {shop.Id}-w2"],
+            gateway.Calls);
+        Assert.Equal(2, (await Store.GetAsync(_owner, shop.Id, Ct))!.OldestWalletGeneration);
+    }
+
+    [Fact]
+    public async Task SeveralWalletChangesBetweenPassesDeleteEveryOlderGeneration()
+    {
+        var shop = await CreateAsync("A");
+        await ChangeWalletAsync(shop, "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359");
+        await ChangeWalletAsync(shop, "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB");
+        var gateway = new FakeGateway();
+
+        await NewReconciler(gateway).RunOnceAsync(Ct);
+
+        Assert.Equal([$"apply {shop.Id}-w3", $"delete {shop.Id}-w1", $"delete {shop.Id}-w2"], gateway.Calls);
+        Assert.Equal(3, (await Store.GetAsync(_owner, shop.Id, Ct))!.OldestWalletGeneration);
+    }
+
+    [Fact]
+    public async Task AFailedWalletDeleteIsRetriedOnTheNextPass()
+    {
+        var shop = await CreateAsync("A");
+        await ChangeWalletAsync(shop, "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359");
+        var gateway = new FakeGateway { FailWalletDeletes = 1 };
+
+        Assert.Equal(new ReconcilePass(true, 0, 1), await NewReconciler(gateway).RunOnceAsync(Ct));
+        Assert.Equal(1, (await Store.GetAsync(_owner, shop.Id, Ct))!.OldestWalletGeneration);
+
+        Assert.Equal(new ReconcilePass(true, 1, 0), await NewReconciler(gateway).RunOnceAsync(Ct));
+        Assert.Equal([$"apply {shop.Id}-w2", $"apply {shop.Id}-w2", $"delete {shop.Id}-w1"], gateway.Calls);
+        Assert.Equal(2, (await Store.GetAsync(_owner, shop.Id, Ct))!.OldestWalletGeneration);
+    }
+
     [Fact]
     public async Task WithoutRecordsTheClusterIsNotEvenContacted()
     {
@@ -247,6 +297,14 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
 
         public IReadOnlyList<ShopResources> Applied => [.. _applied];
 
+        private readonly ConcurrentQueue<string> _calls = new();
+
+        /// <summary>Applies and Wallet deletes in order, as "apply id-wN" and "delete id-wN".</summary>
+        public IReadOnlyList<string> Calls => [.. _calls];
+
+        /// <summary>Deleting this Wallet generation fails (once per entry in the count).</summary>
+        public int FailWalletDeletes { get; set; }
+
         public int Resolutions => _resolutions;
 
         public FakeGateway Resolve()
@@ -269,9 +327,20 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
             }
 
             _applied.Enqueue(shop);
+            _calls.Enqueue($"apply {shop.Id}-w{shop.WalletGeneration}");
         }
 
-        public Task DeleteWalletAsync(string id, int generation, CancellationToken ct) => throw new NotSupportedException();
+        public Task DeleteWalletAsync(string id, int generation, CancellationToken ct)
+        {
+            if (FailWalletDeletes > 0)
+            {
+                FailWalletDeletes--;
+                throw new HttpRequestException("API server unreachable");
+            }
+
+            _calls.Enqueue($"delete {id}-w{generation}");
+            return Task.CompletedTask;
+        }
 
         public Task DeleteShopAsync(string id, int walletGeneration, CancellationToken ct) => throw new NotSupportedException();
 

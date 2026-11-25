@@ -240,11 +240,115 @@ public sealed class ShopStoreTests(PostgresContainer db) : IClassFixture<Postgre
     [InlineData("UPDATE shops SET display_name = ''")]
     [InlineData("UPDATE shops SET display_name_key = 'other'")]
     [InlineData("UPDATE shops SET id = 'S1'")]
+    [InlineData("UPDATE shops SET oldest_wallet_generation = 2")]
+    [InlineData("UPDATE shops SET oldest_wallet_generation = 0")]
     public async Task TheSchemaRefusesInvalidRows(string sql)
     {
         await Store.CreateAsync(_ownerA, Shop("Acme"), Max, T0, Ct);
         await using var conn = await _sources[0].OpenConnectionAsync(Ct);
 
         await Assert.ThrowsAsync<PostgresException>(() => Pg.ExecuteAsync(conn, sql, Ct));
+    }
+
+    private async Task<int> OldestAsync(string id)
+    {
+        await using var conn = await _sources[0].OpenConnectionAsync(Ct);
+        await using var cmd = new NpgsqlCommand("SELECT oldest_wallet_generation FROM shops WHERE id = @id", conn) { Parameters = { new("id", id) } };
+        return (int)(await cmd.ExecuteScalarAsync(Ct))!;
+    }
+
+    [Fact]
+    public async Task AnAvailabilityChangeKeepsTheWalletGeneration()
+    {
+        var shop = (await Store.CreateAsync(_ownerA, Shop("Acme"), Max, T0, Ct)).Shop!;
+        var later = T0.AddMinutes(3);
+
+        var result = await Store.UpdateAsync(_ownerA, shop.Id, new ShopChange(Availability.High, null), later, Ct);
+
+        Assert.Equal(UpdateOutcome.Updated, result.Outcome);
+        Assert.Equal(shop with { Availability = Availability.High, UpdatedAt = later }, result.Shop);
+        Assert.Equal(result.Shop, await Store.GetAsync(_ownerA, shop.Id, Ct));
+    }
+
+    [Fact]
+    public async Task ANewWalletAddressTakesTheNextGenerationAndTheSameOneDoesNot()
+    {
+        var shop = (await Store.CreateAsync(_ownerA, Shop("Acme"), Max, T0, Ct)).Shop!;
+
+        var changed = await Store.UpdateAsync(_ownerA, shop.Id, new ShopChange(null, OtherWallet), T0.AddMinutes(1), Ct);
+        var repeat = await Store.UpdateAsync(_ownerA, shop.Id, new ShopChange(Availability.Standard, OtherWallet), T0.AddMinutes(2), Ct);
+        var back = await Store.UpdateAsync(_ownerA, shop.Id, new ShopChange(null, Wallet), T0.AddMinutes(3), Ct);
+
+        Assert.Equal((UpdateOutcome.Updated, OtherWallet, 2), (changed.Outcome, changed.Shop!.WalletAddress, changed.Shop.WalletGeneration));
+        Assert.Equal(UpdateOutcome.Unchanged, repeat.Outcome);
+        Assert.Equal(changed.Shop, repeat.Shop); // nothing written, not even updated_at
+        // Going back to an earlier address is a new Wallet too: a Wallet's address never changes.
+        Assert.Equal((UpdateOutcome.Updated, Wallet, 3), (back.Outcome, back.Shop!.WalletAddress, back.Shop.WalletGeneration));
+        Assert.Equal(1, back.Shop.OldestWalletGeneration);
+    }
+
+    [Fact]
+    public async Task OnlyTheOwnerCanChangeAShopAndNotWhileItIsBeingDeleted()
+    {
+        var shop = (await Store.CreateAsync(_ownerA, Shop("Acme"), Max, T0, Ct)).Shop!;
+        var change = new ShopChange(Availability.High, OtherWallet);
+
+        Assert.Equal(new UpdateResult(UpdateOutcome.NotFound), await Store.UpdateAsync(_ownerB, shop.Id, change, T0, Ct));
+        Assert.Equal(new UpdateResult(UpdateOutcome.NotFound), await Store.UpdateAsync(_ownerA, "s7k2m4qxab", change, T0, Ct));
+        Assert.Equal(new UpdateResult(UpdateOutcome.NotFound), await Store.UpdateAsync(_ownerA, "x' OR '1'='1", change, T0, Ct));
+        await using (var conn = await _sources[0].OpenConnectionAsync(Ct))
+        {
+            await Pg.ExecuteAsync(conn, "UPDATE shops SET state = 'Deleting' WHERE id = @id", Ct, ("id", shop.Id));
+        }
+
+        Assert.Equal(UpdateOutcome.Deleting, (await Store.UpdateAsync(_ownerA, shop.Id, change, T0, Ct)).Outcome);
+        var after = (await Store.GetAsync(_ownerA, shop.Id, Ct))!;
+        Assert.Equal((Availability.Standard, Wallet, 1), (after.Availability, after.WalletAddress, after.WalletGeneration));
+    }
+
+    [Fact]
+    public async Task ConcurrentWalletChangesFromSeveralReplicasEachTakeAGeneration()
+    {
+        var shop = (await Store.CreateAsync(_ownerA, Shop("Acme"), Max, T0, Ct)).Shop!;
+        string[] wallets =
+        [
+            OtherWallet, "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB", "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+        ];
+
+        var results = await Task.WhenAll(wallets.Select(w =>
+            new PostgresShopStore(NewSource()).UpdateAsync(_ownerA, shop.Id, new ShopChange(null, w), T0, Ct)));
+
+        Assert.All(results, r => Assert.Equal(UpdateOutcome.Updated, r.Outcome));
+        Assert.Equal([2, 3, 4], results.Select(r => r.Shop!.WalletGeneration).Order());
+        var last = results.MaxBy(r => r.Shop!.WalletGeneration)!.Shop!;
+        Assert.Equal(last, await Store.GetAsync(_ownerA, shop.Id, Ct));
+    }
+
+    /// <summary>The row lock: a double submit from several replicas takes one generation, not one each.</summary>
+    [Fact]
+    public async Task TheSameWalletChangeFromSeveralReplicasAtOnceTakesOneGeneration()
+    {
+        var shop = (await Store.CreateAsync(_ownerA, Shop("Acme"), Max, T0, Ct)).Shop!;
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ =>
+            new PostgresShopStore(NewSource()).UpdateAsync(_ownerA, shop.Id, new ShopChange(null, OtherWallet), T0, Ct)));
+
+        Assert.Single(results, r => r.Outcome == UpdateOutcome.Updated);
+        Assert.All(results, r => Assert.Equal(2, r.Shop!.WalletGeneration));
+    }
+
+    [Fact]
+    public async Task MarkingOldWalletsDeletedNeverGoesBackNorPastTheCurrentGeneration()
+    {
+        var shop = (await Store.CreateAsync(_ownerA, Shop("Acme"), Max, T0, Ct)).Shop!;
+        await Store.UpdateAsync(_ownerA, shop.Id, new ShopChange(null, OtherWallet), T0, Ct);
+        await Store.UpdateAsync(_ownerA, shop.Id, new ShopChange(null, Wallet), T0, Ct); // generation 3
+
+        await Store.MarkOldWalletsDeletedAsync(shop.Id, 3, Ct);
+        await Store.MarkOldWalletsDeletedAsync(shop.Id, 2, Ct); // a pass that read an older record
+        Assert.Equal(3, await OldestAsync(shop.Id));
+
+        await Store.MarkOldWalletsDeletedAsync(shop.Id, 4, Ct); // not yet a generation of this shop
+        Assert.Equal(3, await OldestAsync(shop.Id));
     }
 }

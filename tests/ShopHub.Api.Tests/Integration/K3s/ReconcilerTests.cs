@@ -15,7 +15,8 @@ namespace ShopHub.Api.Tests.Integration.K3s;
 /// T018: the reconciler against a real API server, as ShopHub's ServiceAccount, with records in
 /// PostgreSQL. Create, no-op repeat, drift repair, interrupted create at each step (SC-010), and an
 /// object with ShopHub's labels but no record that every pass leaves alone (FR-015). Every request
-/// is recorded: nothing lists, selects by label or deletes.
+/// is recorded: nothing lists or selects by label, and the only delete is an old Wallet generation
+/// after a wallet change (T021, FR-009), by name, once the Shop points at the new one.
 /// </summary>
 [Collection(K3sGroup.Name)]
 public sealed class ReconcilerTests(K3sCluster cluster, PostgresContainer db)
@@ -245,6 +246,45 @@ public sealed class ReconcilerTests(K3sCluster cluster, PostgresContainer db)
         Assert.DoesNotContain(_recorder.Requests, r => r.PathAndQuery.Contains(stray, StringComparison.Ordinal));
         AssertOnlyNamedApplies();
         await cluster.Admin.CustomObjects.DeleteNamespacedCustomObjectAsync(Group, Version, Shops, "shops", stray, cancellationToken: Ct);
+    }
+
+    /// <summary>
+    /// FR-009 order: Wallet <c>-w2</c> is applied, then the Shop is pointed at it, and only then is
+    /// <c>-w1</c> deleted, by name. Afterwards exactly one Wallet of the shop exists, and a later pass
+    /// deletes nothing more.
+    /// </summary>
+    [Fact]
+    public async Task AWalletChangeCreatesTheNewWalletRepointsTheShopThenDeletesTheOldOne()
+    {
+        const string newAddress = "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359";
+        var record = await CreateRecordAsync();
+        await NewReconciler().RunOnceAsync(Ct);
+        await Store.UpdateAsync(_owner, record.Id, new ShopChange(Availability.High, newAddress), T0, Ct);
+        _recorder.Clear();
+
+        Assert.Equal(new ReconcilePass(true, 1, 0), await NewReconciler().RunOnceAsync(Ct));
+
+        var prefix = $"/apis/{Group}/{Version}/namespaces/{Shops}/";
+        Assert.Equal(
+            [
+                ("PATCH", $"discordchannels/{record.Id}"),
+                ("PATCH", $"wallets/{record.Id}-w2"),
+                ("PATCH", $"shops/{record.Id}"),
+                ("DELETE", $"wallets/{record.Id}-w1"),
+            ],
+            _recorder.Requests.Select(r => (r.Method, r.PathAndQuery.Split('?')[0].Replace(prefix, "", StringComparison.Ordinal))));
+
+        var shop = (await GetAsync("shops", record.Id))!.Value.GetProperty("spec");
+        Assert.Equal($"{record.Id}-w2", shop.GetProperty("walletRef").GetProperty("name").GetString());
+        Assert.Equal("high", shop.GetProperty("availability").GetString());
+        Assert.Equal(newAddress, (await GetAsync("wallets", $"{record.Id}-w2"))!.Value.GetProperty("spec").GetProperty("address").GetString());
+        var wallets = (JsonElement)JsonSerializer.SerializeToElement(await cluster.Admin.CustomObjects.ListNamespacedCustomObjectAsync(
+            Group, Version, Shops, "wallets", labelSelector: $"shophub.io/shop={record.Id}", cancellationToken: Ct));
+        Assert.Equal([$"{record.Id}-w2"], wallets.GetProperty("items").EnumerateArray().Select(i => i.GetProperty("metadata").GetProperty("name").GetString()));
+
+        _recorder.Clear();
+        await NewReconciler().RunOnceAsync(Ct);
+        Assert.DoesNotContain(_recorder.Requests, r => r.Method == "DELETE");
     }
 
     [Fact]

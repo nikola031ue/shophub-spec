@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text.Json.Nodes;
 using Npgsql;
 using ShopHub.Api.Storage.Postgres;
 
@@ -41,10 +42,17 @@ public sealed record ShopRecord(
     int WalletGeneration,
     string State,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    int OldestWalletGeneration = 1);
 
 /// <summary>A validated create request: trimmed name, known enum values, EIP-55 wallet address.</summary>
 public sealed record NewShop(string DisplayName, string Availability, string Database, string WalletAddress);
+
+/// <summary>
+/// A validated change (FR-012): only availability and wallet address can change; null leaves a
+/// value as it is. The wallet address is in EIP-55 form.
+/// </summary>
+public sealed record ShopChange(string? Availability, string? WalletAddress);
 
 /// <summary>Validation of data-model.md <c>shops</c> (FR-006). Field keys match the API's request fields.</summary>
 public static class ShopRules
@@ -105,6 +113,64 @@ public static class ShopRules
 
         return problems.Count == 0 ? new NewShop(displayName!, availability!, database!, wallet!) : null;
     }
+
+    public const string ReadOnlyProblem = "This can't be changed after the shop is created.";
+    public const string NothingToChangeProblem = "Send a new availability or wallet address.";
+    public const string UnknownFieldProblem = "This field isn't part of a shop change.";
+
+    /// <summary>
+    /// Validates a change request (contracts/panel-api.md PATCH): only <c>availability</c> and
+    /// <c>walletAddress</c> may appear, at least one of them. <c>name</c> and <c>database</c> are
+    /// refused by field, even with an unchanged value (FR-012), as is any other field.
+    /// </summary>
+    public static ShopChange? ValidateChange(JsonObject? body, out Dictionary<string, string[]> problems)
+    {
+        problems = [];
+        if (body is null)
+        {
+            problems[""] = [NothingToChangeProblem];
+            return null;
+        }
+
+        string? availability = null, wallet = null;
+        foreach (var (key, value) in body)
+        {
+            switch (key)
+            {
+                case "availability":
+                    availability = Text(value);
+                    if (!Availability.IsValid(availability))
+                    {
+                        problems[key] = [AvailabilityProblem];
+                    }
+
+                    break;
+                case "walletAddress":
+                    wallet = Eip55.Normalize(Text(value), out var walletProblem);
+                    if (walletProblem is not null)
+                    {
+                        problems[key] = [walletProblem];
+                    }
+
+                    break;
+                case "name" or "database":
+                    problems[key] = [ReadOnlyProblem];
+                    break;
+                default:
+                    problems[key] = [UnknownFieldProblem];
+                    break;
+            }
+        }
+
+        if (problems.Count == 0 && availability is null && wallet is null)
+        {
+            problems[""] = [NothingToChangeProblem];
+        }
+
+        return problems.Count == 0 ? new ShopChange(availability, wallet) : null;
+
+        static string? Text(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var text) ? text : null;
+    }
 }
 
 /// <summary>Generated shop identifiers (research R9): <c>s</c> + 9 random lowercase base32 characters.</summary>
@@ -132,6 +198,23 @@ public enum CreateOutcome
 
 public sealed record CreateResult(CreateOutcome Outcome, ShopRecord? Shop = null);
 
+public enum UpdateOutcome
+{
+    /// <summary>The record changed (a new wallet address also took a new Wallet generation).</summary>
+    Updated,
+
+    /// <summary>The values sent are the current ones (a repeat); nothing was written.</summary>
+    Unchanged,
+
+    /// <summary>No such shop for this owner (another owner's shop looks the same).</summary>
+    NotFound,
+
+    /// <summary>The shop is being deleted; it can't be changed any more.</summary>
+    Deleting,
+}
+
+public sealed record UpdateResult(UpdateOutcome Outcome, ShopRecord? Shop = null);
+
 /// <summary>
 /// Shop records. Every method that serves an owner takes the owner id and filters on it (FR-005):
 /// another owner's shop and a missing one look the same (null).
@@ -150,6 +233,19 @@ public interface IShopStore
     Task<ShopRecord?> GetAsync(Guid ownerId, string id, CancellationToken ct);
 
     /// <summary>
+    /// Changes availability and/or wallet address in one transaction under a row lock on the shop
+    /// (FR-012). A different wallet address takes the next Wallet generation (FR-009); the same
+    /// address doesn't. <c>updated_at</c> moves only when something changed.
+    /// </summary>
+    Task<UpdateResult> UpdateAsync(Guid ownerId, string id, ShopChange change, DateTimeOffset now, CancellationToken ct);
+
+    /// <summary>
+    /// Records that Wallet generations below <paramref name="generation"/> are deleted. For the
+    /// reconciler only. It never lowers the value, so a pass that read an older record can't undo a newer one.
+    /// </summary>
+    Task MarkOldWalletsDeletedAsync(string id, int generation, CancellationToken ct);
+
+    /// <summary>
     /// Every record of every owner, oldest first. For the reconciler only, which applies each record
     /// by its own names; never used to answer an owner.
     /// </summary>
@@ -159,7 +255,8 @@ public interface IShopStore
 public sealed class PostgresShopStore(NpgsqlDataSource dataSource, Func<string>? newId = null) : IShopStore
 {
     private const string Columns =
-        "id, owner_id, display_name, availability, database, wallet_address, wallet_generation, state, created_at, updated_at";
+        "id, owner_id, display_name, availability, database, wallet_address, wallet_generation, state, created_at, updated_at, " +
+        "oldest_wallet_generation";
 
     // Collisions are about 1 in 35 billion per pair of shops; a few retries are plenty.
     private const int IdAttempts = 5;
@@ -245,6 +342,62 @@ public sealed class PostgresShopStore(NpgsqlDataSource dataSource, Func<string>?
         return await ReadOneAsync(conn, "owner_id = @owner AND id = @id", ct, ("owner", ownerId), ("id", id));
     }
 
+    public async Task<UpdateResult> UpdateAsync(
+        Guid ownerId, string id, ShopChange change, DateTimeOffset now, CancellationToken ct)
+    {
+        if (!ShopNames.IsValidId(id))
+        {
+            return new UpdateResult(UpdateOutcome.NotFound);
+        }
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // Serialises changes (and, with T022, a delete) of this shop across requests and replicas.
+        var current = await QueryOneAsync(conn, $"SELECT {Columns} FROM shops WHERE owner_id = @owner AND id = @id FOR UPDATE",
+            ct, ("owner", ownerId), ("id", id));
+        if (current is null)
+        {
+            await tx.CommitAsync(ct);
+            return new UpdateResult(UpdateOutcome.NotFound);
+        }
+
+        if (current.State == RecordState.Deleting)
+        {
+            await tx.CommitAsync(ct);
+            return new UpdateResult(UpdateOutcome.Deleting, current);
+        }
+
+        var availability = change.Availability ?? current.Availability;
+        var wallet = change.WalletAddress ?? current.WalletAddress;
+        var walletChanged = !string.Equals(wallet, current.WalletAddress, StringComparison.Ordinal);
+        if (availability == current.Availability && !walletChanged)
+        {
+            await tx.CommitAsync(ct);
+            return new UpdateResult(UpdateOutcome.Unchanged, current);
+        }
+
+        var updated = await QueryOneAsync(conn, $"""
+            UPDATE shops
+               SET availability = @availability, wallet_address = @wallet,
+                   wallet_generation = wallet_generation + @step, updated_at = @now
+             WHERE id = @id
+            RETURNING {Columns}
+            """, ct, ("availability", availability), ("wallet", wallet), ("step", walletChanged ? 1 : 0),
+            ("now", Pg.Time(now)), ("id", id));
+        await tx.CommitAsync(ct);
+        return new UpdateResult(UpdateOutcome.Updated, updated);
+    }
+
+    public async Task MarkOldWalletsDeletedAsync(string id, int generation, CancellationToken ct)
+    {
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await Pg.ExecuteAsync(conn, """
+            UPDATE shops SET oldest_wallet_generation = @generation
+             WHERE id = @id AND oldest_wallet_generation < @generation AND wallet_generation >= @generation
+            """, ct, ("id", ShopNames.Checked(id)), ("generation", generation));
+    }
+
     /// <summary>
     /// A repeat of the same create: same name as entered (after trimming), same settings, and
     /// not being deleted. Anything else with the same name key is a duplicate name.
@@ -292,7 +445,8 @@ public sealed class PostgresShopStore(NpgsqlDataSource dataSource, Func<string>?
         r.GetInt32(6),
         r.GetString(7),
         r.GetFieldValue<DateTimeOffset>(8),
-        r.GetFieldValue<DateTimeOffset>(9));
+        r.GetFieldValue<DateTimeOffset>(9),
+        r.GetInt32(10));
 }
 
 /// <summary>Formats used in messages (kept here so the API and tests agree).</summary>
@@ -302,4 +456,6 @@ public static class ShopMessages
         string.Create(CultureInfo.InvariantCulture, $"You already have {max} shops, the most an owner can have. Delete one to create another.");
 
     public const string DuplicateName = "You already have a shop with this name.";
+
+    public const string BeingDeleted = "This shop is being deleted and can't be changed.";
 }
