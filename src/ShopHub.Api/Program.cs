@@ -32,6 +32,9 @@ builder.Services.AddDataProtection().SetApplicationName("shophub");
 builder.Services.AddOptions<KeyManagementOptions>()
     .Configure<NpgsqlDataSource>((o, db) => o.XmlRepository = new PostgresXmlRepository(db));
 
+// Shop records (FR-005, FR-006, FR-011, FR-015); the shop endpoints come with T019.
+builder.Services.AddSingleton<IShopStore>(sp => new PostgresShopStore(sp.GetRequiredService<NpgsqlDataSource>()));
+
 // In the cluster: the pod's ServiceAccount (RBAC in the shophub chart). Elsewhere: the kubeconfig.
 // Created on first use, so the app starts without a cluster.
 builder.Services.AddSingleton<IKubernetes>(_ => new Kubernetes(KubernetesClientConfiguration.IsInCluster()
