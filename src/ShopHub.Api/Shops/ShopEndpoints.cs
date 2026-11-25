@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using ShopHub.Api.Auth;
 
@@ -6,13 +7,15 @@ namespace ShopHub.Api.Shops;
 /// <summary>
 /// Shop API (contracts/panel-api.md "Shops", FR-005 to FR-011, FR-016). Every handler takes the
 /// owner from the session and reads the record through that owner: another owner's shop and a
-/// missing one get the identical 404. Delete comes with US5.
+/// missing one get the identical 404.
 /// </summary>
 public static class ShopEndpoints
 {
     public const string NotFoundTitle = "Shop not found.";
 
     public sealed record CreateShopRequest(string? Name, string? Availability, string? Database, string? WalletAddress);
+
+    public sealed record DeleteShopRequest(string? ConfirmName);
 
     /// <summary>contracts/panel-api.md <c>Shop</c>.</summary>
     public sealed record ShopDto(
@@ -39,6 +42,7 @@ public static class ShopEndpoints
         shops.MapPost("", CreateAsync).RequireXsrf();
         shops.MapGet("/{id}", GetAsync);
         shops.MapPatch("/{id}", UpdateAsync).RequireXsrf();
+        shops.MapDelete("/{id}", DeleteAsync).RequireXsrf();
         shops.MapPost("/{id}/admin-password", AdminPasswordAsync).RequireXsrf();
         return app;
     }
@@ -61,6 +65,29 @@ public static class ShopEndpoints
     }
 
     private static Guid Owner(HttpContext context) => Sessions.OwnerId(context.User)!.Value;
+
+    /// <summary>
+    /// The JSON body, or null when there is none, it isn't JSON, or it doesn't parse. Read here
+    /// rather than bound as a parameter: a bound body makes the route require a JSON content type,
+    /// and a request without one would get the framework's 404 instead of the 400 the contract gives.
+    /// </summary>
+    private static async Task<T?> BodyAsync<T>(HttpRequest request, CancellationToken ct)
+        where T : class
+    {
+        if (!request.HasJsonContentType())
+        {
+            return null;
+        }
+
+        try
+        {
+            return await request.ReadFromJsonAsync<T>(ct);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>The cluster isn't asked about shops being deleted; their state doesn't depend on it.</summary>
     private static Task<ShopStatus?> StatusAsync(IKubeGateway kube, ShopRecord record, CancellationToken ct) =>
@@ -139,10 +166,10 @@ public static class ShopEndpoints
     /// applies it (and for a new wallet: new Wallet, Shop repointed, old Wallet deleted, FR-009).
     /// </summary>
     private static async Task<IResult> UpdateAsync(
-        string id, JsonObject? body, HttpContext context, IShopStore store, IKubeGateway kube, ReconcileTrigger trigger,
+        string id, HttpContext context, IShopStore store, IKubeGateway kube, ReconcileTrigger trigger,
         TimeProvider time, CancellationToken ct)
     {
-        var change = ShopRules.ValidateChange(body, out var problems);
+        var change = ShopRules.ValidateChange(await BodyAsync<JsonObject>(context.Request, ct), out var problems);
         if (change is null)
         {
             return Results.ValidationProblem(problems);
@@ -162,6 +189,30 @@ public static class ShopEndpoints
         }
 
         return Results.Ok(ToDto(result.Shop!, await StatusAsync(kube, result.Shop!, ct), now));
+    }
+
+    /// <summary>
+    /// FR-013: 202 with the shop as "being deleted" once the typed name matches; the reconciler,
+    /// woken now, deletes the cluster objects by name and then the record. A repeat while it is
+    /// being deleted answers 202 again. Ownership comes first, so a stranger gets the plain 404
+    /// whatever name they type, and a missing body is a mismatch like any other.
+    /// </summary>
+    private static async Task<IResult> DeleteAsync(
+        string id, HttpContext context, IShopStore store, ReconcileTrigger trigger, TimeProvider time, CancellationToken ct)
+    {
+        var request = await BodyAsync<DeleteShopRequest>(context.Request, ct);
+        var now = time.GetUtcNow();
+        var result = await store.MarkDeletingAsync(Owner(context), id, request?.ConfirmName, now, ct);
+        switch (result.Outcome)
+        {
+            case DeleteOutcome.NotFound:
+                return NotFound();
+            case DeleteOutcome.NameMismatch:
+                return Results.ValidationProblem(new Dictionary<string, string[]> { ["confirmName"] = [ShopMessages.ConfirmNameProblem] });
+        }
+
+        trigger.Wake();
+        return Results.Json(ToDto(result.Shop!, null, now), statusCode: StatusCodes.Status202Accepted);
     }
 
     /// <summary>

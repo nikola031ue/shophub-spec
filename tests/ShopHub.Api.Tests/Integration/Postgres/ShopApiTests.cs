@@ -8,7 +8,7 @@ namespace ShopHub.Api.Tests.Integration.Postgres;
 
 /// <summary>
 /// T019 shop API on PostgreSQL with a fake cluster (contracts/panel-api.md "Shops"): list, create,
-/// read, change (T021), the admin-password hand-off (FR-016) and 503 when a dependency doesn't answer. Isolation
+/// read, change (T021), delete (T022), the admin-password hand-off (FR-016) and 503 when a dependency doesn't answer. Isolation
 /// between owners is in <c>Isolation/ShopIsolationTests</c>.
 /// </summary>
 public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresContainer>
@@ -509,6 +509,7 @@ public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresC
                      (new { availability = "medium" }, "availability"),
                      (new { walletAddress = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAEd" }, "walletAddress"),
                      (new { }, ""),
+                     (null!, ""),
                  })
         {
             using var response = await owner.SendAsync(HttpMethod.Patch, $"/api/shops/{id}", body);
@@ -538,5 +539,105 @@ public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresC
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Equal("deleting", (string?)(await ReadAsync(response))!["reason"]);
         Assert.Equal("standard", (string?)(await ListAsync(owner))[0]["availability"]);
+    }
+
+    [Fact]
+    public async Task DeleteNeedsASignedInOwnerAndTheXsrfToken()
+    {
+        var (app, _, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme"))["id"]!;
+        using var anonymous = await BrowserAsync(app);
+
+        using (var response = await anonymous.SendAsync(HttpMethod.Delete, $"/api/shops/{id}", new { confirmName = "Acme" }))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Delete, $"/api/shops/{id}")
+        {
+            Content = System.Net.Http.Json.JsonContent.Create(new { confirmName = "Acme" }),
+        };
+        request.Headers.Add("Cookie", owner.Cookie("shophub.session"));
+        using (var response = await owner.Http.SendAsync(request, Ct))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        }
+
+        Assert.Equal("preparing", (string?)(await ListAsync(owner))[0]["state"]);
+    }
+
+    [Fact]
+    public async Task AMistypedOrMissingNameIs400AndDeletesNothing()
+    {
+        var (app, kube, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme Clothing"))["id"]!;
+
+        foreach (var body in new object?[] { new { confirmName = "acme clothing" }, new { confirmName = "Acme" }, new { }, null })
+        {
+            using var response = await owner.SendAsync(HttpMethod.Delete, $"/api/shops/{id}", body);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal(ShopMessages.ConfirmNameProblem, (string?)(await ReadAsync(response))!["errors"]!["confirmName"]![0]);
+        }
+
+        Assert.Equal("preparing", (string?)(await ListAsync(owner))[0]["state"]);
+        Assert.Empty(kube.Deleted);
+    }
+
+    [Fact]
+    public async Task DeleteAnswers202BeingDeletedThenTheShopLeavesTheList()
+    {
+        var (app, kube, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme Clothing"))["id"]!;
+        kube.SetReady(id);
+        // Finalizers hold the channel for a moment: the shop shows as being deleted meanwhile.
+        kube.SetRemaining(id, $"discordchannels/{id}");
+
+        using var response = await owner.SendAsync(HttpMethod.Delete, $"/api/shops/{id}", new { confirmName = " Acme Clothing " });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var shop = (await ReadAsync(response))!;
+        Assert.Equal((id, "deleting"), ((string)shop["id"]!, (string)shop["state"]!));
+        Assert.Null(shop["url"]);
+        for (var i = 0; i < 100 && !kube.Deleted.Contains(id); i++)
+        {
+            await Task.Delay(50, Ct);
+        }
+
+        Assert.Contains(id, kube.Deleted);
+        Assert.Equal("deleting", (string?)(await ListAsync(owner)).Single()["state"]);
+
+        using (var repeat = await owner.SendAsync(HttpMethod.Delete, $"/api/shops/{id}", new { confirmName = "Acme Clothing" }))
+        {
+            Assert.Equal(HttpStatusCode.Accepted, repeat.StatusCode);
+        }
+
+        using (var change = await owner.SendAsync(HttpMethod.Patch, $"/api/shops/{id}", new { availability = "high" }))
+        {
+            Assert.Equal(HttpStatusCode.Conflict, change.StatusCode);
+        }
+
+        using (var password = await owner.SendAsync(HttpMethod.Post, $"/api/shops/{id}/admin-password"))
+        {
+            Assert.Equal("notReady", (string?)(await ReadAsync(password))!["reason"]);
+        }
+
+        // The objects are gone: the woken reconciler (5 s while waiting) removes the record.
+        kube.SetRemaining(id);
+        var shops = await ListAsync(owner);
+        for (var i = 0; i < 200 && shops.Length > 0; i++)
+        {
+            await Task.Delay(50, Ct);
+            shops = await ListAsync(owner);
+        }
+
+        Assert.Empty(shops);
+        using var gone = await owner.SendAsync(HttpMethod.Get, $"/api/shops/{id}");
+        Assert.Equal(HttpStatusCode.NotFound, gone.StatusCode);
     }
 }

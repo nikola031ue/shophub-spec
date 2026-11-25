@@ -75,6 +75,11 @@ export class ShopsApi {
     return firstValueFrom(this.http.patch<Shop>(`/api/shops/${encodeURIComponent(id)}`, change));
   }
 
+  /** 202 with the shop as "being deleted"; repeating it while deleting answers the same. */
+  remove(id: string, confirmName: string): Promise<Shop> {
+    return firstValueFrom(this.http.delete<Shop>(`/api/shops/${encodeURIComponent(id)}`, { body: { confirmName } }));
+  }
+
   async adminPassword(id: string): Promise<string> {
     const answer = await firstValueFrom(
       this.http.post<{ password: string }>(`/api/shops/${encodeURIComponent(id)}/admin-password`, null),

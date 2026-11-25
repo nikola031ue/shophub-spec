@@ -2,6 +2,7 @@ import { Component, InjectionToken, OnDestroy, OnInit, inject, signal } from '@a
 import { problemMessage } from '../shared/api';
 import { AdminPassword } from './admin-password';
 import { ShopCreate } from './shop-create';
+import { ShopDelete } from './shop-delete';
 import { ShopEdit } from './shop-edit';
 import { AVAILABILITY_LABELS, DATABASE_LABELS, STATE_LABELS, Shop, ShopsApi } from './shops-api';
 
@@ -11,13 +12,14 @@ export const REFRESH_INTERVAL_MS = new InjectionToken<number>('REFRESH_INTERVAL_
 });
 
 /**
- * The owner's shops (FR-008) with "Change settings" (FR-012), and the create form. While any shop is not ready the list reloads on
+ * The owner's shops (FR-008) with "Change settings" (FR-012) and "Delete shop" (FR-013), and the
+ * create form. A shop being deleted stays listed (and polled) until it is gone. While any shop is not ready the list reloads on
  * its own; once all are ready it stops. Storefront links open in a new tab without access to the
  * panel window (FR-010).
  */
 @Component({
   selector: 'app-shop-list',
-  imports: [AdminPassword, ShopCreate, ShopEdit],
+  imports: [AdminPassword, ShopCreate, ShopDelete, ShopEdit],
   template: `
     <section class="card">
       <h2>Your shops</h2>
@@ -62,6 +64,7 @@ export const REFRESH_INTERVAL_MS = new InjectionToken<number>('REFRESH_INTERVAL_
             }
             @if (shop.state !== 'deleting') {
               <app-shop-edit [shop]="shop" (saved)="reload()" />
+              <app-shop-delete [shop]="shop" (deleted)="reload()" />
             }
           </li>
         }

@@ -124,7 +124,7 @@ describe('ShopList (FR-008, FR-010)', () => {
     fixture.destroy();
   });
 
-  it('offers "Change settings" except for shops being deleted, and reloads after a save', async () => {
+  it('offers "Change settings" and "Delete shop" except for shops being deleted, and reloads after a save', async () => {
     configure();
     const deleting = preparing({ id: 's3del33333', name: 'Old', state: 'deleting', reason: null });
     const fixture = await render([shop(), deleting]);
@@ -133,6 +133,10 @@ describe('ShopList (FR-008, FR-010)', () => {
 
     expect(changeButton('s7k2m4qxab')).toBeDefined();
     expect(changeButton('s3del33333')).toBeUndefined();
+    const deleteButton = (id: string) =>
+      [...el(fixture).querySelectorAll(`[data-shop=${id}] button`)].find((b) => b.textContent?.includes('Delete shop'));
+    expect(deleteButton('s7k2m4qxab')).toBeDefined();
+    expect(deleteButton('s3del33333')).toBeUndefined();
 
     (changeButton('s7k2m4qxab') as HTMLButtonElement).click();
     await fixture.whenStable();
