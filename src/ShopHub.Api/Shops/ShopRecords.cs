@@ -148,6 +148,12 @@ public interface IShopStore
     Task<IReadOnlyList<ShopRecord>> ListAsync(Guid ownerId, CancellationToken ct);
 
     Task<ShopRecord?> GetAsync(Guid ownerId, string id, CancellationToken ct);
+
+    /// <summary>
+    /// Every record of every owner, oldest first. For the reconciler only, which applies each record
+    /// by its own names; never used to answer an owner.
+    /// </summary>
+    Task<IReadOnlyList<ShopRecord>> ListAllForReconcilerAsync(CancellationToken ct);
 }
 
 public sealed class PostgresShopStore(NpgsqlDataSource dataSource, Func<string>? newId = null) : IShopStore
@@ -207,11 +213,17 @@ public sealed class PostgresShopStore(NpgsqlDataSource dataSource, Func<string>?
         throw new InvalidOperationException("Could not generate an unused shop id.");
     }
 
-    public async Task<IReadOnlyList<ShopRecord>> ListAsync(Guid ownerId, CancellationToken ct)
+    public Task<IReadOnlyList<ShopRecord>> ListAsync(Guid ownerId, CancellationToken ct) =>
+        ListWhereAsync("WHERE owner_id = @owner ORDER BY created_at DESC, id", ct, ("owner", ownerId));
+
+    public Task<IReadOnlyList<ShopRecord>> ListAllForReconcilerAsync(CancellationToken ct) =>
+        ListWhereAsync("ORDER BY created_at, id", ct);
+
+    private async Task<IReadOnlyList<ShopRecord>> ListWhereAsync(
+        string clause, CancellationToken ct, params (string Name, object? Value)[] parameters)
     {
         await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var cmd = Pg.Command(conn,
-            $"SELECT {Columns} FROM shops WHERE owner_id = @owner ORDER BY created_at DESC, id", ("owner", ownerId));
+        await using var cmd = Pg.Command(conn, $"SELECT {Columns} FROM shops {clause}", parameters);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         var shops = new List<ShopRecord>();
         while (await reader.ReadAsync(ct))

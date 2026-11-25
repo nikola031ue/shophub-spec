@@ -4,8 +4,8 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: accounts API, Kubernetes gateway, the panel's sign-in and registration pages, and shop
-records. The reconciler, shop endpoints and shop pages come next.
+Status: accounts API, Kubernetes gateway, the panel's sign-in and registration pages, shop records
+and the reconciler. The shop endpoints and shop pages come next.
 
 ## Run locally
 
@@ -117,6 +117,31 @@ applies to the cluster):
   - an owner with 5 shops in any state, including ones being deleted, gets the limit.
 - **Owner filter**: every owner-facing query takes the owner id. Another owner's shop and a missing
   one look the same.
+
+## Reconciler
+
+`Shops/Reconciler.cs` makes the cluster match the `shops` table:
+
+- **When:** at start, every 30 s, and when an API write wakes it.
+- **One replica at a time:** a pass holds a PostgreSQL advisory lock for its transaction. The lock
+  is released on commit, rollback or a lost connection, and a replica that can't get it skips the
+  pass.
+- **What it applies:** for every `Active` record, the DiscordChannel, the current Wallet and the
+  Shop, in that order, by server-side apply. That one step creates a shop, finishes an interrupted
+  create and repairs drift (a deleted object, a field changed by hand). A pass with nothing to
+  change changes nothing.
+- **By exact name only:** it works from records and the names derived from them. It never lists,
+  selects by label or deletes, so an object without a record, even one carrying ShopHub's labels,
+  is never touched. Deletion (`Deleting` records) and old Wallet generations come with the delete
+  and wallet-change features.
+- **Failures:** one failing shop is logged and retried next pass without stopping the others. A
+  host without cluster access starts normally, and with no records it never contacts the cluster.
+
+`Shops/StateMapping.cs` and `Shops/ReasonTexts.cs` turn a record and its Shop status into the
+panel state:
+
+- being deleted, ready, being prepared, or needs attention after 10 minutes not ready;
+- a plain-language reason. The operator's own message is never shown.
 
 ## Kubernetes access
 
