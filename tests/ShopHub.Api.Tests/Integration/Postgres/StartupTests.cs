@@ -19,7 +19,8 @@ public sealed class ShopHubApp(
     IReadOnlyDictionary<string, string?> env,
     LogSink? logs = null,
     TimeSpan? startupTimeout = null,
-    IPasswordHasher<OwnerUser>? hasher = null) : WebApplicationFactory<Program>
+    IPasswordHasher<OwnerUser>? hasher = null,
+    Action<IServiceCollection>? services = null) : WebApplicationFactory<Program>
 {
     /// <summary>TestServer has no peer address; this test-only header simulates the TCP peer.</summary>
     public const string PeerHeader = "X-Test-Peer";
@@ -30,6 +31,11 @@ public sealed class ShopHubApp(
         if (hasher is not null)
         {
             builder.ConfigureServices(s => s.AddSingleton(hasher));
+        }
+
+        if (services is not null)
+        {
+            builder.ConfigureServices(services);
         }
 
         foreach (var (key, value) in env)

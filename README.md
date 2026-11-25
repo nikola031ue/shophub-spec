@@ -4,8 +4,9 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: accounts API, Kubernetes gateway, the panel's sign-in and registration pages, shop records
-and the reconciler. The shop endpoints and shop pages come next.
+Status: accounts API, Kubernetes gateway, the panel's sign-in and registration pages, shop records,
+the reconciler and the shop API (list, create, read, admin password). The shop pages, change and
+delete come next.
 
 ## Run locally
 
@@ -72,6 +73,30 @@ shows whether it was taken (both steps are rate-limited or locked out).
   token is fetched from `/api/session` first; a stale one (the session ended on the server) is
   replaced once on the API's XSRF 400. Any other 401 means the session ended: the panel goes to
   sign-in.
+
+## Shops API
+
+`Shops/ShopEndpoints.cs`. All need a session; writes need `X-XSRF-TOKEN`.
+
+| Method | Path | Answer |
+|--------|------|--------|
+| GET | `/api/shops` | 200 `{shops:[Shop]}`: the caller's shops, newest first, with state, reason and URL from the cluster |
+| POST | `/api/shops` | 201 `Shop` (being prepared) and the reconciler is woken. 200 with the existing `Shop` for a repeat of the same create. 400 field errors. 409 `reason: duplicateName` or `reason: limit` |
+| GET | `/api/shops/{id}` | 200 `Shop` · 404 |
+| POST | `/api/shops/{id}/admin-password` | 200 `{password}` with `Cache-Control: no-store` · 409 `reason: notReady` or `reason: changed` · 404 · 503 when the shop doesn't answer |
+
+- **Owner isolation:** another owner's shop and an unknown id get the identical 404, and nothing
+  is read from the cluster for them (`tests/.../Integration/Isolation/`).
+- **Admin password hand-off:** checked in this order:
+  - ownership;
+  - the Shop is ready;
+  - the shop itself is asked over its in-cluster Service (`http://<id>.shops.svc.cluster.local/api/shop`)
+    whether its admin already changed the password;
+  - only then is Secret `<id>-admin` read.
+
+  The password is in no other response and in no log line.
+- **503** when the database or the Kubernetes API doesn't answer. Create still works while the
+  cluster is down: it writes only the record, and the reconciler applies it later.
 
 ## Security building blocks
 
