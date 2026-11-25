@@ -1,0 +1,32 @@
+# ShopHub's RBAC as specified in spec 004 contracts/delivery.md (chart shophub 0.2.0, rbac.yaml):
+# a Role and RoleBinding in the shops namespace only, no ClusterRole. The chart must render the
+# same rules; the k3s tests assert what this grants and refuses.
+#
+# Secrets: `get` only. RBAC can't restrict to names matching <id>-admin (resourceNames needs exact
+# names known in advance), so the gateway is the one that reads nothing but <id>-admin.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shophub
+  namespace: shops
+rules:
+  - apiGroups: ["shophub.io"]
+    resources: ["shops", "wallets", "discordchannels"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shophub
+  namespace: shops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: shophub
+subjects:
+  - kind: ServiceAccount
+    name: shophub
+    namespace: shophub

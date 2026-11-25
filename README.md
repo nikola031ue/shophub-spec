@@ -48,6 +48,24 @@ Ported from the shop app (shop 0.2.0) with their tests, and adapted to many acco
 - **Headers**: every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Content-Security-Policy: frame-ancestors 'none'` and `Referrer-Policy: same-origin`.
 
+## Kubernetes access
+
+`Shops/KubeGateway.cs` is the only code that talks to the API server, as the pod's
+ServiceAccount (a kubeconfig outside the cluster):
+
+- It server-side applies a shop's DiscordChannel, current Wallet and Shop with field manager
+  `shophub`, and reads the Shop's status.
+- Every object is named exactly from the shop record (`<id>`, `<id>-w<generation>`). Deletes go
+  one object at a time; nothing lists or selects by label, so a mistake can't reach another shop.
+- The only Secret it reads is `<id>-admin`. RBAC grants `get` on Secrets in `shops` (no list or
+  watch) and can't narrow that to a name pattern, so the gateway is what enforces it; the tests
+  record every request to prove it.
+- RBAC (chart `shophub`, see `tests/.../K3s/Manifests/shophub-rbac.yaml`): a Role in `shops` only.
+  Shops, Wallets, DiscordChannels: `get list watch create patch delete`; Secrets: `get`.
+
+The k3s tests (`Integration/K3s/`) run the gateway against a real API server with the
+shop-operator CRDs from the pinned chart and assert the RBAC with access reviews.
+
 ## Run locally
 
 Requirements: .NET SDK (version in `global.json`), Node 24 (or 22), Docker.
@@ -73,7 +91,7 @@ docker run --rm -p 8080:8080 -e DATABASE_URL=… shophub:dev
 ## Tests
 
 ```bash
-dotnet test --solution ShopHub.slnx          # unit + Testcontainers PostgreSQL (needs Docker)
+dotnet test --solution ShopHub.slnx          # unit + Testcontainers PostgreSQL and k3s (needs Docker)
 (cd src/ShopHub.Web && npx ng test --watch=false)
 ```
 
