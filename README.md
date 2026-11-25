@@ -4,8 +4,8 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: foundation (settings, database start-up, schema). Accounts, shops and the Kubernetes
-gateway come in the next phases.
+Status: accounts API and Kubernetes gateway. The panel's shop pages and the Angular sign-in pages
+come next.
 
 ## Settings
 
@@ -24,6 +24,22 @@ message that names the variable, never its value.
 At start the app applies its schema (`Storage/Postgres/Scripts/NNN_*.sql`, each once, under an
 advisory lock, so replicas can start together). Until the database answers it retries with
 backoff and does not open its port; `/healthz` answers only while the database does.
+
+## Accounts API
+
+| Method | Path | Answer |
+|--------|------|--------|
+| GET | `/api/session` | `{signedIn, email?}`; (re)issues the `XSRF-TOKEN` cookie |
+| POST | `/api/register` | 202, no body, no cookie, **the same whether or not the email is taken**; then sign in |
+| POST | `/api/signin` | 204 + session cookie · 401 "Wrong email or password." for a wrong password and an unknown email alike · 429 locked |
+| POST | `/api/signout` | 204; ends this session only |
+| POST | `/api/password` | 204; ends every other session of the owner · 401 wrong current password (counts towards the lockout) |
+
+State-changing requests need the `X-XSRF-TOKEN` header. No account enumeration: every path that
+checks or sets a password does exactly one PBKDF2 run, and an unknown email is verified against a
+fixed dummy hash, so neither the answer nor its timing tells a taken email from a free one. Known
+limit: without email verification, registering an email and then signing in with that password
+shows whether it was taken (both steps are rate-limited or locked out).
 
 ## Security building blocks
 
