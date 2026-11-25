@@ -4,7 +4,7 @@ using ShopHub.Api.Storage;
 namespace ShopHub.Api;
 
 /// <summary>
-/// Turns unhandled exceptions into problem details: 503 when the database doesn't answer, otherwise
+/// Turns unhandled exceptions into problem details: 503 when the database or the Kubernetes API doesn't answer, otherwise
 /// a generic 500 with a correlation id. Details go only to the log, with credentials removed
 /// (contracts/http-api.md "Never in responses or logs").
 /// </summary>
@@ -50,7 +50,7 @@ public static partial class ErrorHandling
             }
         });
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Database unavailable ({Error})")]
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Database or Kubernetes API unavailable ({Error})")]
     private static partial void LogUnavailable(ILogger logger, string error);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Unhandled error {CorrelationId}: {Error}")]

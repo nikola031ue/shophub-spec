@@ -54,6 +54,10 @@ builder.Services.AddSingleton(sp => new Reconciler(
     sp.GetRequiredService<ILogger<Reconciler>>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Reconciler>());
 
+// FR-016: asks a shop over its in-cluster Service whether its admin password was changed.
+builder.Services.AddHttpClient<IShopAdminProbe, HttpShopAdminProbe>((http, sp) =>
+    new HttpShopAdminProbe(http, sp.GetRequiredService<Settings>().ShopsNamespace, sp.GetRequiredService<ILogger<HttpShopAdminProbe>>()));
+
 builder.Services.AddProblemDetails();
 builder.Services.AddTrustedProxies();
 builder.Services.AddRateLimits();
@@ -80,6 +84,7 @@ app.MapGet("/healthz", async (NpgsqlDataSource db, CancellationToken ct) =>
 });
 
 app.MapAccountEndpoints();
+app.MapShopEndpoints();
 
 // Unknown API paths are 404s; every other path is a client route of the Angular app.
 app.MapFallback("/api/{**path}", () => Results.Problem(statusCode: StatusCodes.Status404NotFound));

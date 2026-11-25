@@ -1,0 +1,166 @@
+using ShopHub.Api.Auth;
+
+namespace ShopHub.Api.Shops;
+
+/// <summary>
+/// Shop API (contracts/panel-api.md "Shops", FR-005 to FR-011, FR-016). Every handler takes the
+/// owner from the session and reads the record through that owner: another owner's shop and a
+/// missing one get the identical 404. Change and delete come with US4 and US5.
+/// </summary>
+public static class ShopEndpoints
+{
+    public const string NotFoundTitle = "Shop not found.";
+
+    public sealed record CreateShopRequest(string? Name, string? Availability, string? Database, string? WalletAddress);
+
+    /// <summary>contracts/panel-api.md <c>Shop</c>.</summary>
+    public sealed record ShopDto(
+        string Id,
+        string Name,
+        string Availability,
+        string Database,
+        string WalletAddress,
+        string State,
+        string? Reason,
+        string? Url,
+        int ReadyReplicas,
+        int Replicas,
+        DateTimeOffset CreatedAt);
+
+    public sealed record ShopListDto(IReadOnlyList<ShopDto> Shops);
+
+    public sealed record AdminPasswordDto(string Password);
+
+    public static IEndpointRouteBuilder MapShopEndpoints(this IEndpointRouteBuilder app)
+    {
+        var shops = app.MapGroup("/api/shops").RequireAuthorization(Sessions.Policy);
+        shops.MapGet("", ListAsync);
+        shops.MapPost("", CreateAsync).RequireXsrf();
+        shops.MapGet("/{id}", GetAsync);
+        shops.MapPost("/{id}/admin-password", AdminPasswordAsync).RequireXsrf();
+        return app;
+    }
+
+    public static ShopDto ToDto(ShopRecord record, ShopStatus? status, DateTimeOffset now)
+    {
+        var panel = StateMapping.Map(record, status, now);
+        return new ShopDto(
+            record.Id,
+            record.DisplayName,
+            record.Availability,
+            record.Database,
+            record.WalletAddress,
+            panel.State,
+            panel.Reason,
+            status?.Url,
+            status?.ReadyReplicas ?? 0,
+            ReasonTexts.Replicas(record.Availability),
+            record.CreatedAt);
+    }
+
+    private static Guid Owner(HttpContext context) => Sessions.OwnerId(context.User)!.Value;
+
+    /// <summary>The cluster isn't asked about shops being deleted; their state doesn't depend on it.</summary>
+    private static Task<ShopStatus?> StatusAsync(IKubeGateway kube, ShopRecord record, CancellationToken ct) =>
+        record.State == RecordState.Deleting ? Task.FromResult<ShopStatus?>(null) : kube.GetShopStatusAsync(record.Id, ct);
+
+    private static IResult NotFound() => Results.Problem(statusCode: StatusCodes.Status404NotFound, title: NotFoundTitle);
+
+    private static IResult Conflict(string title, string reason, IDictionary<string, string[]>? errors = null)
+    {
+        var extensions = new Dictionary<string, object?> { ["reason"] = reason };
+        if (errors is not null)
+        {
+            extensions["errors"] = errors;
+        }
+
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: title, extensions: extensions);
+    }
+
+    private static async Task<IResult> ListAsync(
+        HttpContext context, IShopStore store, IKubeGateway kube, TimeProvider time, CancellationToken ct)
+    {
+        var records = await store.ListAsync(Owner(context), ct);
+        var statuses = await Task.WhenAll(records.Select(r => StatusAsync(kube, r, ct)));
+        var now = time.GetUtcNow();
+        return Results.Ok(new ShopListDto([.. records.Select((r, i) => ToDto(r, statuses[i], now))]));
+    }
+
+    /// <summary>
+    /// 201 for a new shop; 200 with the existing shop for a repeat of the same create (SC-010).
+    /// Only the record is written here; the reconciler, woken now, creates the cluster objects.
+    /// </summary>
+    private static async Task<IResult> CreateAsync(
+        CreateShopRequest request, HttpContext context, IShopStore store, IKubeGateway kube, Settings settings,
+        ReconcileTrigger trigger, TimeProvider time, CancellationToken ct)
+    {
+        var shop = ShopRules.Validate(request.Name, request.Availability, request.Database, request.WalletAddress, out var problems);
+        if (shop is null)
+        {
+            return Results.ValidationProblem(problems);
+        }
+
+        var now = time.GetUtcNow();
+        var result = await store.CreateAsync(Owner(context), shop, settings.MaxShopsPerOwner, now, ct);
+        switch (result.Outcome)
+        {
+            case CreateOutcome.Created:
+                trigger.Wake();
+                return Results.Created($"/api/shops/{result.Shop!.Id}", ToDto(result.Shop, null, now));
+            case CreateOutcome.Existing:
+                trigger.Wake();
+                return Results.Ok(ToDto(result.Shop!, await StatusAsync(kube, result.Shop!, ct), now));
+            case CreateOutcome.DuplicateName:
+                return Conflict(ShopMessages.DuplicateName, "duplicateName",
+                    new Dictionary<string, string[]> { ["name"] = [ShopMessages.DuplicateName] });
+            default:
+                return Conflict(ShopMessages.Limit(settings.MaxShopsPerOwner), "limit");
+        }
+    }
+
+    private static async Task<IResult> GetAsync(
+        string id, HttpContext context, IShopStore store, IKubeGateway kube, TimeProvider time, CancellationToken ct)
+    {
+        if (await store.GetAsync(Owner(context), id, ct) is not { } record)
+        {
+            return NotFound();
+        }
+
+        return Results.Ok(ToDto(record, await StatusAsync(kube, record, ct), time.GetUtcNow()));
+    }
+
+    /// <summary>
+    /// FR-016: the generated shop admin password, to the shop's owner only, on an explicit request.
+    /// Ownership first (404), then readiness, then the shop itself is asked whether the password was
+    /// already changed; only if not is Secret <c>&lt;id&gt;-admin</c> read. Never cached or logged.
+    /// </summary>
+    private static async Task<IResult> AdminPasswordAsync(
+        string id, HttpContext context, IShopStore store, IKubeGateway kube, IShopAdminProbe probe, CancellationToken ct)
+    {
+        if (await store.GetAsync(Owner(context), id, ct) is not { } record)
+        {
+            return NotFound();
+        }
+
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        const string notReady = "The shop isn't ready yet. Try again when it is.";
+        if (record.State == RecordState.Deleting || await kube.GetShopStatusAsync(record.Id, ct) is not { Ready: true })
+        {
+            return Conflict(notReady, "notReady");
+        }
+
+        switch (await probe.AdminPasswordChangedAsync(record.Id, ct))
+        {
+            case null:
+                return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+                    title: "The shop didn't answer. Try again shortly.");
+            case true:
+                return Conflict("The shop admin has already changed this password. Use the new one.", "changed");
+        }
+
+        return await kube.ReadAdminPasswordAsync(record.Id, ct) is { } password
+            ? Results.Ok(new AdminPasswordDto(password))
+            : Conflict(notReady, "notReady");
+    }
+}
