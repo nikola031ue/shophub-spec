@@ -20,6 +20,8 @@ public sealed class FakeKube : IKubeGateway, IShopAdminProbe
     private readonly ConcurrentQueue<string> _statusReads = new();
     private readonly ConcurrentQueue<string> _secretReads = new();
     private readonly ConcurrentQueue<string> _probes = new();
+    private readonly ConcurrentQueue<string> _deleted = new();
+    private readonly ConcurrentDictionary<string, string[]> _remaining = new();
 
     /// <summary>When true, every call fails as if the API server were unreachable.</summary>
     public bool Down { get; set; }
@@ -31,6 +33,12 @@ public sealed class FakeKube : IKubeGateway, IShopAdminProbe
     public IReadOnlyList<string> SecretReads => [.. _secretReads];
 
     public IReadOnlyList<string> Probes => [.. _probes];
+
+    /// <summary>Shop ids whose objects were deleted (each call).</summary>
+    public IReadOnlyList<string> Deleted => [.. _deleted];
+
+    /// <summary>Objects of a shop that still exist after its delete (finalizers); none by default.</summary>
+    public void SetRemaining(string id, params string[] names) => _remaining[id] = names;
 
     public void SetStatus(string id, ShopStatus status) => _statuses[id] = status;
 
@@ -87,8 +95,16 @@ public sealed class FakeKube : IKubeGateway, IShopAdminProbe
 
     public Task DeleteWalletAsync(string id, int generation, CancellationToken ct) => throw new NotSupportedException();
 
-    public Task DeleteShopAsync(string id, int walletGeneration, CancellationToken ct) => throw new NotSupportedException();
+    public Task DeleteShopAsync(string id, int walletGeneration, CancellationToken ct)
+    {
+        ThrowIfDown();
+        _deleted.Enqueue(id);
+        return Task.CompletedTask;
+    }
 
-    public Task<IReadOnlyList<string>> RemainingAsync(string id, int walletGeneration, CancellationToken ct) =>
-        throw new NotSupportedException();
+    public Task<IReadOnlyList<string>> RemainingAsync(string id, int walletGeneration, CancellationToken ct)
+    {
+        ThrowIfDown();
+        return Task.FromResult<IReadOnlyList<string>>(_remaining.TryGetValue(id, out var names) ? names : []);
+    }
 }

@@ -45,6 +45,7 @@ form button[type='submit'] { margin-top: 1rem; }
 .search { display: flex; gap: 0.5rem; }
 .search button { margin-top: 0; }
 .item-form { border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 1rem 1rem; margin: 1rem 0; max-width: 28rem; }
+.item-form.danger-zone { border-color: var(--danger); }
 .actions { display: flex; gap: 0.5rem; }
 
 table { width: 100%; border-collapse: collapse; margin-top: 1rem; }

@@ -69,10 +69,11 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
         var gateway = new FakeGateway();
         var pass = await NewReconciler(gateway).RunOnceAsync(Ct);
 
-        Assert.Equal(new ReconcilePass(true, 2, 0), pass);
+        Assert.Equal(new ReconcilePass(true, 2, 0, Removed: 1), pass);
         Assert.Equal(
             new[] { a, b }.Select(Reconciler.Resources).OrderBy(r => r.Id, StringComparer.Ordinal),
             gateway.Applied.OrderBy(r => r.Id, StringComparer.Ordinal));
+        Assert.DoesNotContain(gateway.Calls, c => c.StartsWith($"apply {deleting.Id}", StringComparison.Ordinal));
     }
 
     private Task<UpdateResult> ChangeWalletAsync(ShopRecord shop, string wallet) =>
@@ -123,6 +124,62 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
         Assert.Equal(new ReconcilePass(true, 1, 0), await NewReconciler(gateway).RunOnceAsync(Ct));
         Assert.Equal([$"apply {shop.Id}-w2", $"apply {shop.Id}-w2", $"delete {shop.Id}-w1"], gateway.Calls);
         Assert.Equal(2, (await Store.GetAsync(_owner, shop.Id, Ct))!.OldestWalletGeneration);
+    }
+
+    private async Task<bool> ExistsAsync(string id) =>
+        (await Store.ListAllForReconcilerAsync(Ct)).Any(r => r.Id == id);
+
+    private async Task MarkDeletingAsync(ShopRecord shop) =>
+        Assert.Equal(DeleteOutcome.Marked, (await Store.MarkDeletingAsync(_owner, shop.Id, shop.DisplayName, T0, Ct)).Outcome);
+
+    /// <summary>FR-013: a deleted shop's objects are deleted by name, and its row goes once none is left.</summary>
+    [Fact]
+    public async Task ADeletedShopsObjectsAreDeletedAndThenItsRowIsRemoved()
+    {
+        var shop = await CreateAsync("A");
+        await ChangeWalletAsync(shop, "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359");
+        await MarkDeletingAsync(shop);
+        var gateway = new FakeGateway();
+
+        Assert.Equal(new ReconcilePass(true, 0, 0, Removed: 1), await NewReconciler(gateway).RunOnceAsync(Ct));
+
+        Assert.Equal([$"delete shop {shop.Id} w1..w2"], gateway.Calls);
+        Assert.False(await ExistsAsync(shop.Id));
+    }
+
+    [Fact]
+    public async Task WhileFinalizersHoldObjectsTheRowStaysAndPassesComeSooner()
+    {
+        var shop = await CreateAsync("A");
+        await MarkDeletingAsync(shop);
+        var gateway = new FakeGateway();
+        gateway.RemainingAnswers.Enqueue([$"discordchannels/{shop.Id}"]);
+
+        Assert.Equal(new ReconcilePass(true, 0, 0, Removed: 0, Waiting: 1), await NewReconciler(gateway).RunOnceAsync(Ct));
+        Assert.True(await ExistsAsync(shop.Id));
+        Assert.True(Reconciler.DeletingInterval < Reconciler.Interval);
+
+        Assert.Equal(new ReconcilePass(true, 0, 0, Removed: 1), await NewReconciler(gateway).RunOnceAsync(Ct));
+        Assert.False(await ExistsAsync(shop.Id));
+        // The delete is repeated each pass (by name; already-deleting objects are left as they are).
+        Assert.Equal(2, gateway.Calls.Count(c => c.StartsWith("delete shop", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task AFailedDeleteKeepsTheRowAndDoesNotStopOtherShops()
+    {
+        var gone = await CreateAsync("Gone");
+        var active = await CreateAsync("Active");
+        await MarkDeletingAsync(gone);
+        var gateway = new FakeGateway { FailShopDeletes = true };
+
+        Assert.Equal(new ReconcilePass(true, 1, 1), await NewReconciler(gateway).RunOnceAsync(Ct));
+        Assert.True(await ExistsAsync(gone.Id));
+        Assert.Contains($"apply {active.Id}-w1", gateway.Calls);
+
+        gateway.FailShopDeletes = false;
+        Assert.Equal(new ReconcilePass(true, 1, 0, Removed: 1), await NewReconciler(gateway).RunOnceAsync(Ct));
+        Assert.False(await ExistsAsync(gone.Id));
     }
 
     [Fact]
@@ -342,10 +399,24 @@ public sealed class ReconcilerPassTests(PostgresContainer db) : IClassFixture<Po
             return Task.CompletedTask;
         }
 
-        public Task DeleteShopAsync(string id, int walletGeneration, CancellationToken ct) => throw new NotSupportedException();
+        /// <summary>Objects reported as still existing after a shop delete, per pass, in order.</summary>
+        public Queue<string[]> RemainingAnswers { get; } = new();
+
+        public bool FailShopDeletes { get; set; }
+
+        public Task DeleteShopAsync(string id, int walletGeneration, CancellationToken ct)
+        {
+            if (FailShopDeletes)
+            {
+                throw new HttpRequestException("API server unreachable");
+            }
+
+            _calls.Enqueue($"delete shop {id} w1..w{walletGeneration}");
+            return Task.CompletedTask;
+        }
 
         public Task<IReadOnlyList<string>> RemainingAsync(string id, int walletGeneration, CancellationToken ct) =>
-            throw new NotSupportedException();
+            Task.FromResult<IReadOnlyList<string>>(RemainingAnswers.TryDequeue(out var names) ? names : []);
 
         public Task<ShopStatus?> GetShopStatusAsync(string id, CancellationToken ct) => throw new NotSupportedException();
 

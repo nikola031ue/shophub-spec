@@ -27,8 +27,12 @@ public sealed class ReconcileTrigger : IDisposable
     public void Dispose() => _signal.Dispose();
 }
 
-/// <summary>What one pass did. <see cref="Ran"/> is false when another replica held the lock.</summary>
-public sealed record ReconcilePass(bool Ran, int Applied, int Failed);
+/// <summary>
+/// What one pass did. <see cref="Ran"/> is false when another replica held the lock.
+/// <see cref="Removed"/>: rows of deleted shops removed; <see cref="Waiting"/>: shops being deleted
+/// whose objects still exist (finalizers), checked again soon.
+/// </summary>
+public sealed record ReconcilePass(bool Ran, int Applied, int Failed, int Removed = 0, int Waiting = 0);
 
 /// <summary>
 /// Makes the cluster match the <c>shops</c> table (research R8, FR-014, FR-015). Every 30 s and
@@ -42,9 +46,17 @@ public sealed record ReconcilePass(bool Ran, int Applied, int Failed);
 /// it (002 <c>InUse</c>), so the delete can't take a Wallet from under a running shop.
 /// </para>
 /// <para>
+/// <para>
+/// A <c>Deleting</c> record (FR-013, T022) is never applied. Each pass deletes its Shop, then its
+/// DiscordChannel and Wallets <c>-w1</c> … <c>-w&lt;generation&gt;</c>, each by name (missing is
+/// fine), and removes the row once none of them exists any more. Finalizers (the operator
+/// deleting the Discord channel, the database, a Wallet still in use) can keep objects for a
+/// while; until then passes come every <see cref="DeletingInterval"/> instead of every 30 s.
+/// </para>
+/// <para>
 /// It works only from records and by exact names: it never lists or selects cluster objects, so
 /// an object without a record is never touched. One shop failing doesn't stop the others; it is
-/// retried on the next pass. Records in state <c>Deleting</c> are not applied (deletion is T022).
+/// retried on the next pass.
 /// </para>
 /// </summary>
 public sealed partial class Reconciler(
@@ -56,6 +68,9 @@ public sealed partial class Reconciler(
 {
     public static readonly TimeSpan Interval = TimeSpan.FromSeconds(30);
 
+    /// <summary>While a deleted shop's objects still exist, so it leaves the list soon after (SC-003).</summary>
+    public static readonly TimeSpan DeletingInterval = TimeSpan.FromSeconds(5);
+
     /// <summary>"SHUB" + 2; the schema migrator uses + 1.</summary>
     public const long LockKey = 0x5348_5542_0002;
 
@@ -65,8 +80,8 @@ public sealed partial class Reconciler(
         {
             try
             {
-                await RunOnceAsync(stoppingToken);
-                await trigger.WaitAsync(Interval, stoppingToken);
+                var pass = await RunOnceAsync(stoppingToken);
+                await trigger.WaitAsync(pass.Waiting > 0 ? DeletingInterval : Interval, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -102,9 +117,11 @@ public sealed partial class Reconciler(
             }
         }
 
-        var active = (await shops.ListAllForReconcilerAsync(ct)).Where(r => r.State == RecordState.Active).ToList();
-        int applied = 0, failed = 0;
-        if (active.Count > 0)
+        var records = await shops.ListAllForReconcilerAsync(ct);
+        var active = records.Where(r => r.State == RecordState.Active).ToList();
+        var deleting = records.Where(r => r.State == RecordState.Deleting).ToList();
+        int applied = 0, failed = 0, removed = 0, waiting = 0;
+        if (records.Count > 0)
         {
             // Resolved only when there is work, so a host without cluster access starts and idles quietly.
             var kube = gateway();
@@ -122,10 +139,32 @@ public sealed partial class Reconciler(
                     LogApplyFailed(record.Id, e);
                 }
             }
+
+            foreach (var record in deleting)
+            {
+                try
+                {
+                    await kube.DeleteShopAsync(record.Id, record.WalletGeneration, ct);
+                    if ((await kube.RemainingAsync(record.Id, record.WalletGeneration, ct)).Count > 0)
+                    {
+                        waiting++;
+                    }
+                    else if (await shops.RemoveDeletedAsync(record.Id, ct))
+                    {
+                        removed++;
+                    }
+                }
+                catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    // Counted as failed only: an unreachable API server is retried at the normal interval.
+                    failed++;
+                    LogDeleteFailed(record.Id, e);
+                }
+            }
         }
 
         await tx.CommitAsync(ct);
-        return new ReconcilePass(true, applied, failed);
+        return new ReconcilePass(true, applied, failed, removed, waiting);
     }
 
     /// <summary>
@@ -153,6 +192,9 @@ public sealed partial class Reconciler(
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Applying shop {ShopId} failed; retrying on the next pass.")]
     private partial void LogApplyFailed(string shopId, Exception e);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Deleting shop {ShopId} failed; retrying on the next pass.")]
+    private partial void LogDeleteFailed(string shopId, Exception e);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Reconcile pass failed; retrying in 30 s.")]
     private partial void LogPassFailed(Exception e);

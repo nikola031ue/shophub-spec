@@ -215,6 +215,23 @@ public enum UpdateOutcome
 
 public sealed record UpdateResult(UpdateOutcome Outcome, ShopRecord? Shop = null);
 
+public enum DeleteOutcome
+{
+    /// <summary>The record is now <c>Deleting</c>; the reconciler removes the cluster objects and then the row.</summary>
+    Marked,
+
+    /// <summary>It was already being deleted (a repeat); nothing written.</summary>
+    AlreadyDeleting,
+
+    /// <summary>No such shop for this owner (another owner's shop looks the same).</summary>
+    NotFound,
+
+    /// <summary>The typed name isn't the shop's display name (trimmed, exact case); nothing written.</summary>
+    NameMismatch,
+}
+
+public sealed record DeleteResult(DeleteOutcome Outcome, ShopRecord? Shop = null);
+
 /// <summary>
 /// Shop records. Every method that serves an owner takes the owner id and filters on it (FR-005):
 /// another owner's shop and a missing one look the same (null).
@@ -244,6 +261,19 @@ public interface IShopStore
     /// reconciler only. It never lowers the value, so a pass that read an older record can't undo a newer one.
     /// </summary>
     Task MarkOldWalletsDeletedAsync(string id, int generation, CancellationToken ct);
+
+    /// <summary>
+    /// FR-013: sets the record to <c>Deleting</c> when <paramref name="confirmName"/>, trimmed,
+    /// equals the display name exactly. Under a row lock on the shop, in this order: ownership
+    /// (NotFound, so a stranger learns nothing about the name), then the name, then the state.
+    /// </summary>
+    Task<DeleteResult> MarkDeletingAsync(Guid ownerId, string id, string? confirmName, DateTimeOffset now, CancellationToken ct);
+
+    /// <summary>
+    /// Removes a <c>Deleting</c> row once its cluster objects are gone. For the reconciler only;
+    /// an <c>Active</c> row is never removed. True if a row was removed.
+    /// </summary>
+    Task<bool> RemoveDeletedAsync(string id, CancellationToken ct);
 
     /// <summary>
     /// Every record of every owner, oldest first. For the reconciler only, which applies each record
@@ -389,6 +419,50 @@ public sealed class PostgresShopStore(NpgsqlDataSource dataSource, Func<string>?
         return new UpdateResult(UpdateOutcome.Updated, updated);
     }
 
+    public async Task<DeleteResult> MarkDeletingAsync(
+        Guid ownerId, string id, string? confirmName, DateTimeOffset now, CancellationToken ct)
+    {
+        if (!ShopNames.IsValidId(id))
+        {
+            return new DeleteResult(DeleteOutcome.NotFound);
+        }
+
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var current = await QueryOneAsync(conn, $"SELECT {Columns} FROM shops WHERE owner_id = @owner AND id = @id FOR UPDATE",
+            ct, ("owner", ownerId), ("id", id));
+        if (current is null)
+        {
+            await tx.CommitAsync(ct);
+            return new DeleteResult(DeleteOutcome.NotFound);
+        }
+
+        if (!string.Equals(confirmName?.Trim(), current.DisplayName, StringComparison.Ordinal))
+        {
+            await tx.CommitAsync(ct);
+            return new DeleteResult(DeleteOutcome.NameMismatch);
+        }
+
+        if (current.State == RecordState.Deleting)
+        {
+            await tx.CommitAsync(ct);
+            return new DeleteResult(DeleteOutcome.AlreadyDeleting, current);
+        }
+
+        var marked = await QueryOneAsync(conn, $"""
+            UPDATE shops SET state = @state, updated_at = @now WHERE id = @id RETURNING {Columns}
+            """, ct, ("state", RecordState.Deleting), ("now", Pg.Time(now)), ("id", id));
+        await tx.CommitAsync(ct);
+        return new DeleteResult(DeleteOutcome.Marked, marked);
+    }
+
+    public async Task<bool> RemoveDeletedAsync(string id, CancellationToken ct)
+    {
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        return await Pg.ExecuteAsync(conn, "DELETE FROM shops WHERE id = @id AND state = @state", ct,
+            ("id", ShopNames.Checked(id)), ("state", RecordState.Deleting)) == 1;
+    }
+
     public async Task MarkOldWalletsDeletedAsync(string id, int generation, CancellationToken ct)
     {
         await using var conn = await dataSource.OpenConnectionAsync(ct);
@@ -458,4 +532,6 @@ public static class ShopMessages
     public const string DuplicateName = "You already have a shop with this name.";
 
     public const string BeingDeleted = "This shop is being deleted and can't be changed.";
+
+    public const string ConfirmNameProblem = "Type the shop's name exactly as shown to confirm.";
 }

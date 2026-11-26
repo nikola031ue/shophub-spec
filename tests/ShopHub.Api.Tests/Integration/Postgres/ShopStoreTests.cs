@@ -351,4 +351,57 @@ public sealed class ShopStoreTests(PostgresContainer db) : IClassFixture<Postgre
         await Store.MarkOldWalletsDeletedAsync(shop.Id, 4, Ct); // not yet a generation of this shop
         Assert.Equal(3, await OldestAsync(shop.Id));
     }
+
+    [Fact]
+    public async Task DeletingNeedsTheExactNameAndOnlyTheOwnerCanDoIt()
+    {
+        var shop = (await Store.CreateAsync(_ownerA, Shop("Acme Clothing"), Max, T0, Ct)).Shop!;
+
+        Assert.Equal(new DeleteResult(DeleteOutcome.NotFound), await Store.MarkDeletingAsync(_ownerB, shop.Id, "Acme Clothing", T0, Ct));
+        Assert.Equal(new DeleteResult(DeleteOutcome.NotFound), await Store.MarkDeletingAsync(_ownerA, "s7k2m4qxab", "Acme Clothing", T0, Ct));
+        foreach (var wrong in new[] { "acme clothing", "Acme  Clothing", "Acme", "", null })
+        {
+            Assert.Equal(new DeleteResult(DeleteOutcome.NameMismatch), await Store.MarkDeletingAsync(_ownerA, shop.Id, wrong, T0, Ct));
+        }
+
+        Assert.Equal(RecordState.Active, (await Store.GetAsync(_ownerA, shop.Id, Ct))!.State);
+
+        var later = T0.AddMinutes(4);
+        var marked = await Store.MarkDeletingAsync(_ownerA, shop.Id, "  Acme Clothing ", later, Ct);
+        var repeat = await Store.MarkDeletingAsync(_ownerA, shop.Id, "Acme Clothing", later.AddMinutes(1), Ct);
+
+        Assert.Equal(new DeleteResult(DeleteOutcome.Marked, shop with { State = RecordState.Deleting, UpdatedAt = later }), marked);
+        Assert.Equal(new DeleteResult(DeleteOutcome.AlreadyDeleting, marked.Shop), repeat);
+        Assert.Equal(DeleteOutcome.NameMismatch, (await Store.MarkDeletingAsync(_ownerA, shop.Id, "Wrong", later, Ct)).Outcome);
+    }
+
+    [Fact]
+    public async Task OnlyRowsBeingDeletedAreRemoved()
+    {
+        var active = (await Store.CreateAsync(_ownerA, Shop("Active"), Max, T0, Ct)).Shop!;
+        var gone = (await Store.CreateAsync(_ownerA, Shop("Gone"), Max, T0, Ct)).Shop!;
+        await Store.MarkDeletingAsync(_ownerA, gone.Id, "Gone", T0, Ct);
+
+        Assert.False(await Store.RemoveDeletedAsync(active.Id, Ct));
+        Assert.True(await Store.RemoveDeletedAsync(gone.Id, Ct));
+        Assert.False(await Store.RemoveDeletedAsync(gone.Id, Ct));
+        Assert.Equal([active.Id], (await Store.ListAsync(_ownerA, Ct)).Select(s => s.Id));
+    }
+
+    /// <summary>FR-011: a shop being deleted still counts; once its row is gone, the place is free.</summary>
+    [Fact]
+    public async Task AShopBeingDeletedCountsTowardsTheLimitUntilItIsGone()
+    {
+        for (var i = 0; i < Max; i++)
+        {
+            await Store.CreateAsync(_ownerA, Shop($"S{i}"), Max, T0, Ct);
+        }
+
+        var first = (await Store.ListAsync(_ownerA, Ct)).Single(s => s.DisplayName == "S0");
+        await Store.MarkDeletingAsync(_ownerA, first.Id, "S0", T0, Ct);
+        Assert.Equal(CreateOutcome.LimitReached, (await Store.CreateAsync(_ownerA, Shop("New"), Max, T0, Ct)).Outcome);
+
+        await Store.RemoveDeletedAsync(first.Id, Ct);
+        Assert.Equal(CreateOutcome.Created, (await Store.CreateAsync(_ownerA, Shop("New"), Max, T0, Ct)).Outcome);
+    }
 }

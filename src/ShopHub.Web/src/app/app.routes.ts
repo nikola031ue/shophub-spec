@@ -4,7 +4,7 @@ import { Register } from './auth/register';
 import { SignIn } from './auth/signin';
 import { ShopList } from './shops/shop-list';
 
-// Owner pages sit under the owner guard; changes are made in the list (US4), delete arrives with US5.
+// Owner pages sit under the owner guard; change (US4) and delete (US5) happen in the list.
 export const routes: Routes = [
   { path: '', pathMatch: 'full', component: ShopList, canActivate: [ownerGuard], title: 'Your shops · ShopHub' },
   { path: 'signin', component: SignIn, canActivate: [guestGuard], title: 'Sign in · ShopHub' },

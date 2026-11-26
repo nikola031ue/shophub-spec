@@ -15,8 +15,9 @@ namespace ShopHub.Api.Tests.Integration.K3s;
 /// T018: the reconciler against a real API server, as ShopHub's ServiceAccount, with records in
 /// PostgreSQL. Create, no-op repeat, drift repair, interrupted create at each step (SC-010), and an
 /// object with ShopHub's labels but no record that every pass leaves alone (FR-015). Every request
-/// is recorded: nothing lists or selects by label, and the only delete is an old Wallet generation
-/// after a wallet change (T021, FR-009), by name, once the Shop points at the new one.
+/// is recorded: nothing lists or selects by label. Deletes are by name only: an old Wallet
+/// generation after a wallet change (T021, FR-009), once the Shop points at the new one, and a
+/// deleted shop's objects (T022, FR-013), whose record goes only once all of them are gone.
 /// </summary>
 [Collection(K3sGroup.Name)]
 public sealed class ReconcilerTests(K3sCluster cluster, PostgresContainer db)
@@ -285,6 +286,71 @@ public sealed class ReconcilerTests(K3sCluster cluster, PostgresContainer db)
         _recorder.Clear();
         await NewReconciler().RunOnceAsync(Ct);
         Assert.DoesNotContain(_recorder.Requests, r => r.Method == "DELETE");
+    }
+
+    private async Task MarkDeletingAsync(ShopRecord record) =>
+        Assert.Equal(DeleteOutcome.Marked, (await Store.MarkDeletingAsync(_owner, record.Id, record.DisplayName, T0, Ct)).Outcome);
+
+    private async Task<bool> RecordExistsAsync(string id) => (await Store.ListAllForReconcilerAsync(Ct)).Any(r => r.Id == id);
+
+    /// <summary>
+    /// FR-013, SC-003: the Shop, its DiscordChannel and every Wallet generation are deleted, each by
+    /// its own name (DELETE then GET to see what is left), and then the record is removed.
+    /// </summary>
+    [Fact]
+    public async Task ADeletedShopsObjectsAreDeletedByNameAndThenItsRecord()
+    {
+        var record = await CreateRecordAsync();
+        await NewReconciler().RunOnceAsync(Ct);
+        await Store.UpdateAsync(_owner, record.Id, new ShopChange(null, "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"), T0, Ct);
+        await NewReconciler().RunOnceAsync(Ct); // -w2 in use, -w1 deleted
+        await MarkDeletingAsync(record);
+        _recorder.Clear();
+
+        Assert.Equal(new ReconcilePass(true, 0, 0, Removed: 1), await NewReconciler().RunOnceAsync(Ct));
+
+        Assert.Null(await GetAsync("shops", record.Id));
+        Assert.Null(await GetAsync("discordchannels", record.Id));
+        Assert.Null(await GetAsync("wallets", $"{record.Id}-w2"));
+        Assert.False(await RecordExistsAsync(record.Id));
+
+        var prefix = $"/apis/{Group}/{Version}/namespaces/{Shops}/";
+        var requests = _recorder.Requests.Select(r => (r.Method, r.PathAndQuery.Split('?')[0].Replace(prefix, "", StringComparison.Ordinal))).ToList();
+        Assert.Equal(
+            [
+                ("DELETE", $"shops/{record.Id}"),
+                ("DELETE", $"discordchannels/{record.Id}"),
+                ("DELETE", $"wallets/{record.Id}-w1"),
+                ("DELETE", $"wallets/{record.Id}-w2"),
+            ],
+            requests.Where(r => r.Method == "DELETE"));
+        Assert.All(requests, r => Assert.True(r.Method is "DELETE" or "GET", r.Method));
+        Assert.All(_recorder.Requests, r => Assert.DoesNotContain("labelSelector", r.PathAndQuery, StringComparison.OrdinalIgnoreCase));
+        Assert.All(requests, r => Assert.Equal(2, r.Item2.Split('/').Length)); // <plural>/<name>: never a collection
+    }
+
+    /// <summary>A finalizer (the operator removing the Discord channel) holds the record until the object is gone.</summary>
+    [Fact]
+    public async Task AFinalizerKeepsTheRecordUntilTheObjectIsReallyGone()
+    {
+        var record = await CreateRecordAsync();
+        await NewReconciler().RunOnceAsync(Ct);
+        await cluster.Admin.CustomObjects.PatchNamespacedCustomObjectAsync(
+            new V1Patch("""{"metadata":{"finalizers":["test.shophub.io/hold"]}}""", V1Patch.PatchType.MergePatch),
+            Group, Version, Shops, "discordchannels", record.Id, cancellationToken: Ct);
+        await MarkDeletingAsync(record);
+
+        Assert.Equal(new ReconcilePass(true, 0, 0, Removed: 0, Waiting: 1), await NewReconciler().RunOnceAsync(Ct));
+        Assert.True(await RecordExistsAsync(record.Id));
+        Assert.True((await GetAsync("discordchannels", record.Id))!.Value.GetProperty("metadata").TryGetProperty("deletionTimestamp", out _));
+        Assert.Null(await GetAsync("shops", record.Id));
+
+        await cluster.Admin.CustomObjects.PatchNamespacedCustomObjectAsync(
+            new V1Patch("""{"metadata":{"finalizers":null}}""", V1Patch.PatchType.MergePatch),
+            Group, Version, Shops, "discordchannels", record.Id, cancellationToken: Ct);
+
+        Assert.Equal(new ReconcilePass(true, 0, 0, Removed: 1), await NewReconciler().RunOnceAsync(Ct));
+        Assert.False(await RecordExistsAsync(record.Id));
     }
 
     [Fact]
