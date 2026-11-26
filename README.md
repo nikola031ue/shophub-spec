@@ -4,11 +4,11 @@ The ShopHub panel (spec 004): owners register, sign in and manage their shops. A
 a .NET API in one image; the API is the only writer of the owners' Shop, Wallet and DiscordChannel
 resources (constitution Principle V).
 
-Status: accounts, shop records, the reconciler, the shop API and the panel's pages for signing in,
-listing, creating and opening shops and showing a shop's admin password. Change and delete come
-next.
+Status (0.2.0): accounts; shop records; the reconciler; the shop API; the panel's pages for
+signing in, listing, creating, opening, changing and deleting shops and showing a shop's admin
+password. Validated live on Docker Desktop (spec 004 T025). See [Known limits](#known-limits).
 
-## Run locally
+## Try it with Docker Compose
 
 To click through the panel in a browser, with Docker:
 
@@ -83,10 +83,15 @@ shows whether it was taken (both steps are rate-limited or locked out).
 | GET | `/api/shops` | 200 `{shops:[Shop]}`: the caller's shops, newest first, with state, reason and URL from the cluster |
 | POST | `/api/shops` | 201 `Shop` (being prepared) and the reconciler is woken. 200 with the existing `Shop` for a repeat of the same create. 400 field errors. 409 `reason: duplicateName` or `reason: limit` |
 | GET | `/api/shops/{id}` | 200 `Shop` · 404 |
+| PATCH | `/api/shops/{id}` | `{availability?, walletAddress?}`: 200 `Shop`, also when nothing changes (nothing is written). 400 by field for `name`, `database` (even unchanged), any other field, a bad value or `{}`. 404 · 409 `reason: deleting` |
+| DELETE | `/api/shops/{id}` | `{confirmName}`: 202 `Shop` (being deleted), also for a repeat. 400 on `confirmName` when it isn't the shop's name (trimmed, exact case) or the body is missing. 404 |
 | POST | `/api/shops/{id}/admin-password` | 200 `{password}` with `Cache-Control: no-store` · 409 `reason: notReady` or `reason: changed` · 404 · 503 when the shop doesn't answer |
 
 - **Owner isolation:** another owner's shop and an unknown id get the identical 404, and nothing
-  is read from the cluster for them (`tests/.../Integration/Isolation/`).
+  is read from the cluster for them (`tests/.../Integration/Isolation/`). DELETE checks ownership
+  before the name, so another owner learns nothing even with the right name.
+- **Bodies:** PATCH and DELETE read their JSON body themselves, so a request without one gets
+  the 400 above rather than the framework's 404.
 - **Admin password hand-off:** checked in this order:
   - ownership;
   - the Shop is ready;
@@ -108,6 +113,9 @@ shows whether it was taken (both steps are rate-limited or locked out).
   `rel="noopener noreferrer"`, so the tab gets no access to the panel.
 - **Create:** a form showing the API's field errors next to their fields, a duplicate name on the
   name field, and the limit message.
+- **Edit** (`shop-edit.ts`): availability and wallet address; name and database can't change.
+- **Delete** (`shop-delete.ts`): says what is lost, asks for the shop's name and enables the button
+  only on an exact match (trimmed, same case). Hidden while the shop is being deleted.
 - **Show shop admin password:** fetched only on that click and dropped on "Hide". It comes with a
   link to the shop's admin sign-in and the hint that the shop asks for a new password at the first
   sign-in. Once the admin has changed it, the panel says so instead.
@@ -154,6 +162,12 @@ applies to the cluster):
     existing shop and inserts nothing, so a double submit or retry makes one shop;
   - the same name with other letter case or other settings is a duplicate name;
   - an owner with 5 shops in any state, including ones being deleted, gets the limit.
+- **Change** (availability, wallet) runs under a row lock on the shop. A new wallet address takes
+  the next Wallet generation (`<id>-w<n>`); `oldest_wallet_generation` is the lowest generation
+  that may still exist, so old ones can be deleted later. Repeating the current values writes
+  nothing.
+- **Delete** sets the row to `Deleting` after checking ownership and then the typed name. The row
+  keeps counting towards the limit until the reconciler removes it.
 - **Owner filter**: every owner-facing query takes the owner id. Another owner's shop and a missing
   one look the same.
 
@@ -169,10 +183,14 @@ applies to the cluster):
   Shop, in that order, by server-side apply. That one step creates a shop, finishes an interrupted
   create and repairs drift (a deleted object, a field changed by hand). A pass with nothing to
   change changes nothing.
-- **By exact name only:** it works from records and the names derived from them. It never lists,
-  selects by label or deletes, so an object without a record, even one carrying ShopHub's labels,
-  is never touched. Deletion (`Deleting` records) and old Wallet generations come with the delete
-  and wallet-change features.
+- **By exact name only:** it works from records and the names derived from them. It never lists or
+  selects by label, so an object without a record, even one carrying ShopHub's labels, is never
+  touched.
+- **Old Wallets:** after the Shop points at the current Wallet, generations
+  `oldest … current-1` are deleted by name, then `oldest_wallet_generation` moves up.
+- **Deleting records:** the Shop, then the DiscordChannel and every Wallet generation are deleted
+  by name and read back; the row goes once none of them exists. While finalizers hold any of them,
+  passes run every 5 s instead of 30 s.
 - **Failures:** one failing shop is logged and retried next pass without stopping the others. A
   host without cluster access starts normally, and with no records it never contacts the cluster.
 
@@ -181,6 +199,9 @@ panel state:
 
 - being deleted, ready, being prepared, or needs attention after 10 minutes not ready;
 - a plain-language reason. The operator's own message is never shown.
+- a shop still being deleted after 2 minutes gets a reason naming what holds it (the shop and its
+  database, the notification channel or the wallet record). Only then are its objects read back;
+  their names are never shown.
 
 ## Kubernetes access
 
@@ -197,10 +218,26 @@ ServiceAccount (a kubeconfig outside the cluster):
 - RBAC (chart `shophub`, see `tests/.../K3s/Manifests/shophub-rbac.yaml`): a Role in `shops` only.
   Shops, Wallets, DiscordChannels: `get list watch create patch delete`; Secrets: `get`.
 
+## Known limits
+
+Recorded in spec 004's plan ("Deferred follow-ups"):
+
+- **Restoring a deleted Shop restores the resource, not its data** (D-4). If a Shop is deleted
+  outside ShopHub, the reconciler recreates it within one pass, but the operator has already
+  removed the shop's database, admin password Secret and keys with it: the shop comes back empty.
+  Spec 005 is to keep a Shop until ShopHub has marked it for deletion.
+- **Old Wallets go right after a wallet change** (D-1). Unpaid orders, and orders placed while the
+  old copies are still rolling out, can carry the old address after its Wallet is gone. Spec 005
+  is to keep an old Wallet until the rollout is done and those orders are paid or expired.
+- **Wallet creates and deletes aren't logged** (D-3, spec 006), so the swap order can't be read
+  from logs.
+
+## Tests and the cluster
+
 The k3s tests (`Integration/K3s/`) run the gateway against a real API server with the
 shop-operator CRDs from the pinned chart and assert the RBAC with access reviews.
 
-## Run locally
+## Run locally (development)
 
 Requirements: .NET SDK (version in `global.json`), Node 24 (or 22), Docker.
 
@@ -242,3 +279,11 @@ tests/ShopHub.Api.Tests/  xUnit v3 on Microsoft.Testing.Platform: Unit/, Integra
 CI (`.github/workflows/ci.yaml`) runs `lint` and `test` on every PR and push to main. A tag
 `vX.Y.Z` on a commit that is on main builds and pushes `ghcr.io/nikola031ue/shophub:X.Y.Z`; an
 existing version is never overwritten.
+
+Rolling out a release:
+
+1. Merge to main, then tag it: `git tag -a vX.Y.Z <sha> -m "…"` and `git push origin vX.Y.Z`.
+2. helm-charts: bump chart `shophub` (`version`, and `appVersion` to `X.Y.Z`); merge, and the chart
+   is published.
+3. kube-state: `clusters/local/shophub/helm.yaml` chart tag and `values.yaml` `image.tag`; merge,
+   then `./bring-up.sh`.
