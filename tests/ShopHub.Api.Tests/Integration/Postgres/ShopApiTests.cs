@@ -525,10 +525,13 @@ public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresC
     [Fact]
     public async Task AShopBeingDeletedCannotBeChanged()
     {
-        var (app, _, _) = await AppAsync();
+        var (app, kube, _) = await AppAsync();
         using var _app = app;
         using var owner = await SignedInAsync(app, "x@example.test");
         var id = (string)(await CreateShopAsync(owner, "Acme"))["id"]!;
+        // The app's own reconciler removes a Deleting row once nothing of it is left: keep the Shop
+        // "still there" so the row stays for the whole test.
+        kube.SetRemaining(id, $"shops/{id}");
         await using (var conn = await app.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync(Ct))
         {
             await ShopHub.Api.Storage.Postgres.Pg.ExecuteAsync(conn, "UPDATE shops SET state = 'Deleting' WHERE id = @id", Ct, ("id", id));
