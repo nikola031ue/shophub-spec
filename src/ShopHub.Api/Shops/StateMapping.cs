@@ -17,12 +17,23 @@ public static class StateMapping
     /// <summary>A shop not ready this long after its last change needs attention.</summary>
     public static readonly TimeSpan AttentionAfter = TimeSpan.FromMinutes(10);
 
+    /// <summary>A delete still running this long after it was asked for is past SC-003 (2 minutes).</summary>
+    public static readonly TimeSpan SlowDeleteAfter = TimeSpan.FromMinutes(2);
+
+    /// <summary>Whether the panel should say what still holds a shop being deleted.</summary>
+    public static bool IsSlowDelete(ShopRecord record, DateTimeOffset now) =>
+        record.State == RecordState.Deleting && now - record.UpdatedAt >= SlowDeleteAfter;
+
     /// <param name="status">The Shop's status, or null if the Shop doesn't exist (yet).</param>
-    public static PanelState Map(ShopRecord record, ShopStatus? status, DateTimeOffset now)
+    /// <param name="remaining">
+    /// For a slow delete, the objects still in the cluster (<c>&lt;plural&gt;/&lt;name&gt;</c>);
+    /// otherwise not asked for.
+    /// </param>
+    public static PanelState Map(ShopRecord record, ShopStatus? status, DateTimeOffset now, IReadOnlyList<string>? remaining = null)
     {
         if (record.State == RecordState.Deleting)
         {
-            return new PanelState(PanelStates.Deleting, null);
+            return new PanelState(PanelStates.Deleting, IsSlowDelete(record, now) ? ReasonTexts.ForSlowDelete(remaining ?? []) : null);
         }
 
         if (status is { Ready: true })

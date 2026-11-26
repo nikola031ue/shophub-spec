@@ -17,6 +17,29 @@ public static class ReasonTexts
         ["ReconcileError"] = "Something went wrong on the platform; it keeps retrying.",
     };
 
+    public const string SlowDeleteShop =
+        "Deleting is taking longer than usual: the shop and its database are still being removed. The platform keeps retrying.";
+
+    public const string SlowDeleteChannel =
+        "Deleting is taking longer than usual: the notification channel can't be removed yet. The platform keeps retrying.";
+
+    public const string SlowDeleteWallet =
+        "Deleting is taking longer than usual: the wallet record is still being removed. The platform keeps retrying.";
+
+    /// <summary>
+    /// What still holds a slow delete, in the order things are removed (the Shop first; its Wallets
+    /// and channel wait for it). Null when nothing is left: the record goes on the next pass.
+    /// Object names are never shown.
+    /// </summary>
+    public static string? ForSlowDelete(IReadOnlyList<string> remaining)
+    {
+        bool Any(string plural) => remaining.Any(r => r.StartsWith(plural + "/", StringComparison.Ordinal));
+        return Any(KubeGateway.Shops) ? SlowDeleteShop
+            : Any(KubeGateway.Channels) ? SlowDeleteChannel
+            : Any(KubeGateway.Wallets) ? SlowDeleteWallet
+            : null;
+    }
+
     /// <summary>Copies the shop runs at for an availability (FR-006: standard = 2, high = 3).</summary>
     public static int Replicas(string availability) => availability == Availability.High ? 3 : 2;
 

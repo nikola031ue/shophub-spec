@@ -78,9 +78,10 @@ public sealed class KubeGateway(IKubernetes client, string shopsNamespace) : IKu
     public const string Group = "shophub.io";
     public const string Version = "v1alpha1";
 
-    private const string Shops = "shops";
-    private const string Wallets = "wallets";
-    private const string Channels = "discordchannels";
+    // Plural names; RemainingAsync answers "<plural>/<name>".
+    public const string Shops = "shops";
+    public const string Wallets = "wallets";
+    public const string Channels = "discordchannels";
 
     public async Task ApplyAsync(ShopResources shop, CancellationToken ct)
     {

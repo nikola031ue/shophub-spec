@@ -9,7 +9,7 @@ public sealed class StateMappingTests
 
     private static ShopRecord Record(string state = RecordState.Active, string availability = Availability.Standard) =>
         new("s7k2m4qxab", Guid.Empty, "Acme", availability, DatabaseKind.Standard,
-            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", 1, state, Changed, Changed);
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", 2, state, Changed, Changed);
 
     private static ShopStatus Status(bool ready, string? reason = null, int readyReplicas = 0) =>
         new(ready, reason, "operator detail: deployment/s7k2m4qxab 1/2", null, readyReplicas);
@@ -18,6 +18,37 @@ public sealed class StateMappingTests
     public void DeletingWinsOverEverything() =>
         Assert.Equal(new PanelState(PanelStates.Deleting, null),
             StateMapping.Map(Record(RecordState.Deleting), Status(true), Changed.AddHours(1)));
+
+    [Fact]
+    public void ADeleteWithinTwoMinutesHasNoReason()
+    {
+        var almost = Changed + StateMapping.SlowDeleteAfter - TimeSpan.FromMilliseconds(1);
+        Assert.False(StateMapping.IsSlowDelete(Record(RecordState.Deleting), almost));
+        Assert.Equal(new PanelState(PanelStates.Deleting, null),
+            StateMapping.Map(Record(RecordState.Deleting), null, almost, ["discordchannels/s7k2m4qxab"]));
+    }
+
+    [Fact]
+    public void OnlyARecordBeingDeletedCanBeASlowDelete() =>
+        Assert.False(StateMapping.IsSlowDelete(Record(), Changed.AddHours(1)));
+
+    /// <summary>
+    /// Past SC-003 the panel says what still holds the delete, in removal order, and never names
+    /// an object; nothing left means the record goes on the next pass.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "shops/s7k2m4qxab", "discordchannels/s7k2m4qxab", "wallets/s7k2m4qxab-w2" }, ReasonTexts.SlowDeleteShop)]
+    [InlineData(new[] { "discordchannels/s7k2m4qxab", "wallets/s7k2m4qxab-w1" }, ReasonTexts.SlowDeleteChannel)]
+    [InlineData(new[] { "wallets/s7k2m4qxab-w1" }, ReasonTexts.SlowDeleteWallet)]
+    [InlineData(new string[0], null)]
+    public void ASlowDeleteSaysWhatStillHoldsIt(string[] remaining, string? text)
+    {
+        var at = Changed + StateMapping.SlowDeleteAfter;
+        Assert.True(StateMapping.IsSlowDelete(Record(RecordState.Deleting), at));
+        var panel = StateMapping.Map(Record(RecordState.Deleting), null, at, remaining);
+        Assert.Equal(new PanelState(PanelStates.Deleting, text), panel);
+        Assert.DoesNotContain("s7k2m4qxab", panel.Reason ?? "", StringComparison.Ordinal);
+    }
 
     [Fact]
     public void ReadyAtAnyAgeIsReadyWithoutReason()
