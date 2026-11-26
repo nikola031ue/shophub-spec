@@ -640,4 +640,36 @@ public sealed class ShopApiTests(PostgresContainer db) : IClassFixture<PostgresC
         using var gone = await owner.SendAsync(HttpMethod.Get, $"/api/shops/{id}");
         Assert.Equal(HttpStatusCode.NotFound, gone.StatusCode);
     }
+
+    /// <summary>
+    /// A delete held past SC-003 (here a channel whose finalizer can't finish) says so in the list
+    /// and on the shop, without naming the object; a fresh one has no reason.
+    /// </summary>
+    [Fact]
+    public async Task ASlowDeleteShowsWhatStillHoldsIt()
+    {
+        var (app, kube, _) = await AppAsync();
+        using var _app = app;
+        using var owner = await SignedInAsync(app, "x@example.test");
+        var id = (string)(await CreateShopAsync(owner, "Acme Clothing"))["id"]!;
+        kube.SetRemaining(id, $"discordchannels/{id}");
+        using (var response = await owner.SendAsync(HttpMethod.Delete, $"/api/shops/{id}", new { confirmName = "Acme Clothing" }))
+        {
+            Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+            Assert.Null((await ReadAsync(response))!["reason"]);
+        }
+
+        Assert.Null((await ListAsync(owner)).Single()["reason"]);
+
+        await using (var conn = await app.Services.GetRequiredService<Npgsql.NpgsqlDataSource>().OpenConnectionAsync(Ct))
+        {
+            await ShopHub.Api.Storage.Postgres.Pg.ExecuteAsync(
+                conn, "UPDATE shops SET updated_at = updated_at - interval '3 minutes' WHERE id = @id", Ct, ("id", id));
+        }
+
+        var listed = (await ListAsync(owner)).Single();
+        Assert.Equal(("deleting", ReasonTexts.SlowDeleteChannel), ((string)listed["state"]!, (string?)listed["reason"]));
+        using var one = await owner.SendAsync(HttpMethod.Get, $"/api/shops/{id}");
+        Assert.Equal(ReasonTexts.SlowDeleteChannel, (string?)(await ReadAsync(one))!["reason"]);
+    }
 }

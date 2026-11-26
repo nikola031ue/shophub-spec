@@ -47,9 +47,9 @@ public static class ShopEndpoints
         return app;
     }
 
-    public static ShopDto ToDto(ShopRecord record, ShopStatus? status, DateTimeOffset now)
+    public static ShopDto ToDto(ShopRecord record, ShopStatus? status, DateTimeOffset now, IReadOnlyList<string>? remaining = null)
     {
-        var panel = StateMapping.Map(record, status, now);
+        var panel = StateMapping.Map(record, status, now, remaining);
         return new ShopDto(
             record.Id,
             record.DisplayName,
@@ -89,9 +89,23 @@ public static class ShopEndpoints
         }
     }
 
-    /// <summary>The cluster isn't asked about shops being deleted; their state doesn't depend on it.</summary>
-    private static Task<ShopStatus?> StatusAsync(IKubeGateway kube, ShopRecord record, CancellationToken ct) =>
-        record.State == RecordState.Deleting ? Task.FromResult<ShopStatus?>(null) : kube.GetShopStatusAsync(record.Id, ct);
+    /// <summary>
+    /// The shop as the panel shows it. A shop being deleted has no Shop status to read; the cluster
+    /// is asked about it only once the delete is slow (past SC-003), to say what still holds it,
+    /// for example a channel whose finalizer can't finish.
+    /// </summary>
+    private static async Task<ShopDto> DtoAsync(IKubeGateway kube, ShopRecord record, DateTimeOffset now, CancellationToken ct)
+    {
+        if (record.State == RecordState.Deleting)
+        {
+            var remaining = StateMapping.IsSlowDelete(record, now)
+                ? await kube.RemainingAsync(record.Id, record.WalletGeneration, ct)
+                : null;
+            return ToDto(record, null, now, remaining);
+        }
+
+        return ToDto(record, await kube.GetShopStatusAsync(record.Id, ct), now);
+    }
 
     private static IResult NotFound() => Results.Problem(statusCode: StatusCodes.Status404NotFound, title: NotFoundTitle);
 
@@ -110,9 +124,8 @@ public static class ShopEndpoints
         HttpContext context, IShopStore store, IKubeGateway kube, TimeProvider time, CancellationToken ct)
     {
         var records = await store.ListAsync(Owner(context), ct);
-        var statuses = await Task.WhenAll(records.Select(r => StatusAsync(kube, r, ct)));
         var now = time.GetUtcNow();
-        return Results.Ok(new ShopListDto([.. records.Select((r, i) => ToDto(r, statuses[i], now))]));
+        return Results.Ok(new ShopListDto(await Task.WhenAll(records.Select(r => DtoAsync(kube, r, now, ct)))));
     }
 
     /// <summary>
@@ -138,7 +151,7 @@ public static class ShopEndpoints
                 return Results.Created($"/api/shops/{result.Shop!.Id}", ToDto(result.Shop, null, now));
             case CreateOutcome.Existing:
                 trigger.Wake();
-                return Results.Ok(ToDto(result.Shop!, await StatusAsync(kube, result.Shop!, ct), now));
+                return Results.Ok(await DtoAsync(kube, result.Shop!, now, ct));
             case CreateOutcome.DuplicateName:
                 return Conflict(ShopMessages.DuplicateName, "duplicateName",
                     new Dictionary<string, string[]> { ["name"] = [ShopMessages.DuplicateName] });
@@ -155,7 +168,7 @@ public static class ShopEndpoints
             return NotFound();
         }
 
-        return Results.Ok(ToDto(record, await StatusAsync(kube, record, ct), time.GetUtcNow()));
+        return Results.Ok(await DtoAsync(kube, record, time.GetUtcNow(), ct));
     }
 
     /// <summary>
@@ -188,7 +201,7 @@ public static class ShopEndpoints
                 break;
         }
 
-        return Results.Ok(ToDto(result.Shop!, await StatusAsync(kube, result.Shop!, ct), now));
+        return Results.Ok(await DtoAsync(kube, result.Shop!, now, ct));
     }
 
     /// <summary>
