@@ -114,6 +114,10 @@ public sealed class KubeGateway(IKubernetes client, string shopsNamespace) : IKu
 
     public async Task DeleteShopAsync(string id, int walletGeneration, CancellationToken ct)
     {
+        // Spec 005 D-4: mark the Shop as deleted by ShopHub first; the shop-operator chart's
+        // admission policy refuses any Shop DELETE without this annotation.
+        await AnnotateDeleteRequestedAsync(ShopNames.Shop(id), ct);
+
         // The Shop first: the operator keeps a Wallet or DiscordChannel while a Shop uses it.
         await DeleteObjectAsync(Shops, ShopNames.Shop(id), ct);
         await DeleteObjectAsync(Channels, ShopNames.Channel(id), ct);
@@ -162,12 +166,53 @@ public sealed class KubeGateway(IKubernetes client, string shopsNamespace) : IKu
         string? Text(JsonElement? e, string name) =>
             e is { } v && v.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
 
+        // Spec 005 D-6 (research R12): a status older than the spec says nothing about the change
+        // just made, so the Shop is not ready until the operator has seen it. A status without
+        // observedGeneration can't be dated and is taken as it is.
+        var generation = Number(shop.TryGetProperty("metadata", out var metadata) ? metadata : null, "generation");
+        if (generation is { } current && (Number(status, "observedGeneration") < current || Number(ready, "observedGeneration") < current))
+        {
+            return new ShopStatus(false, ChangePendingReason, null, Text(status, "url"),
+                status.TryGetProperty("readyReplicas", out var stale) && stale.TryGetInt32(out var staleCount) ? staleCount : 0);
+        }
+
         return new ShopStatus(
             Text(ready, "status") == "True",
             Text(ready, "reason"),
             Text(ready, "message"),
             Text(status, "url"),
             status.TryGetProperty("readyReplicas", out var r) && r.TryGetInt32(out var n) ? n : 0);
+    }
+
+    /// <summary>The reason ShopHub reports while the operator hasn't seen the latest change (D-6).</summary>
+    public const string ChangePendingReason = "ChangePending";
+
+    /// <summary>Spec 005 D-4: the annotation ShopHub writes on a Shop right before deleting it.</summary>
+    public const string DeleteRequestedAnnotation = "shophub.io/delete-requested";
+
+    private static long? Number(JsonElement? e, string name) =>
+        e is { ValueKind: JsonValueKind.Object } v && v.TryGetProperty(name, out var p) && p.TryGetInt64(out var n) ? n : null;
+
+    /// <summary>A merge patch on the Shop's annotations; a Shop already gone needs nothing.</summary>
+    private async Task AnnotateDeleteRequestedAsync(string name, CancellationToken ct)
+    {
+        var patch = new Dictionary<string, object>
+        {
+            ["metadata"] = new Dictionary<string, object>
+            {
+                ["annotations"] = new Dictionary<string, string> { [DeleteRequestedAnnotation] = "true" },
+            },
+        };
+        try
+        {
+            await client.CustomObjects.PatchNamespacedCustomObjectAsync(
+                new V1Patch(patch, V1Patch.PatchType.MergePatch), Group, Version, shopsNamespace, Shops, name,
+                fieldManager: FieldManager, cancellationToken: ct);
+        }
+        catch (HttpOperationException e) when (e.Response.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Already gone.
+        }
     }
 
     public async Task<string?> ReadAdminPasswordAsync(string id, CancellationToken ct)

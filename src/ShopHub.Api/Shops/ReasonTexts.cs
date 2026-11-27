@@ -15,6 +15,8 @@ public static class ReasonTexts
         ["DatabaseProvisioning"] = "The database is being prepared.",
         ["DatabaseOperatorMissing"] = "The platform can't create this database type right now.",
         ["ReconcileError"] = "Something went wrong on the platform; it keeps retrying.",
+        // Spec 005 D-6: the operator hasn't picked up the latest change yet (KubeGateway).
+        [KubeGateway.ChangePendingReason] = "Applying your change.",
     };
 
     public const string SlowDeleteShop =
