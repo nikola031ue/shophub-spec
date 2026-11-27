@@ -255,4 +255,75 @@ public sealed class GatewayTests(K3sCluster cluster) : IDisposable
         // Deleting again is fine: everything is already gone.
         await gateway.DeleteShopAsync(id, 2, Ct);
     }
+
+    /// <summary>
+    /// Spec 005 D-4: with the production delete guard, a bare Shop delete (even by ShopHub's own
+    /// identity) is refused; ShopHub's delete annotates first (one PATCH, by name) and goes through.
+    /// </summary>
+    [Fact]
+    public async Task TheDeleteGuardRefusesABareDeleteButNotShopHubsDelete()
+    {
+        var id = NewId();
+        var gateway = Gateway();
+        await gateway.ApplyAsync(Resources(id), Ct);
+
+        var refused = await Assert.ThrowsAsync<k8s.Autorest.HttpOperationException>(() =>
+            cluster.AsShopHub(new RequestRecorder()).CustomObjects.DeleteNamespacedCustomObjectAsync(Group, Version, Shops, "shops", id, cancellationToken: Ct));
+        Assert.Contains("Shops are deleted through ShopHub", refused.Response.Content, StringComparison.Ordinal);
+        Assert.NotNull(await GetAsync("shops", id));
+        _recorder.Clear();
+
+        await gateway.DeleteShopAsync(id, 1, Ct);
+
+        Assert.Empty(await gateway.RemainingAsync(id, 1, Ct));
+        var prefix = $"/apis/{Group}/{Version}/namespaces/{Shops}";
+        Assert.Equal([$"{prefix}/shops/{id}"],
+            _recorder.Requests.Where(r => r.Method == "PATCH").Select(r => r.PathAndQuery.Split('?')[0]));
+        AssertOnlyExactNames();
+    }
+
+    /// <summary>
+    /// Spec 005 D-6: right after a change the Shop's status is older than its spec; it reads as not
+    /// ready ("Applying your change.") until the operator has seen the change.
+    /// </summary>
+    [Fact]
+    public async Task AStatusOlderThanTheSpecIsNotReady()
+    {
+        var id = NewId();
+        var gateway = Gateway();
+        await gateway.ApplyAsync(Resources(id), Ct);
+        async Task SetStatusAsync(long observed, long conditionObserved)
+        {
+            var status = new
+            {
+                status = new
+                {
+                    url = $"https://{id}.shops.localhost",
+                    readyReplicas = 2,
+                    observedGeneration = observed,
+                    conditions = new[]
+                    {
+                        new { type = "Ready", status = "True", reason = "Ready", message = "ok", observedGeneration = conditionObserved,
+                              lastTransitionTime = "2026-11-27T10:00:00Z" },
+                    },
+                },
+            };
+            await cluster.Admin.CustomObjects.PatchNamespacedCustomObjectStatusAsync(
+                new V1Patch(status, V1Patch.PatchType.MergePatch), Group, Version, Shops, "shops", id, cancellationToken: Ct);
+        }
+
+        await SetStatusAsync(1, 1);
+        Assert.True((await gateway.GetShopStatusAsync(id, Ct))!.Ready);
+
+        await gateway.ApplyAsync(Resources(id, availability: "high"), Ct); // generation 2
+        var stale = (await gateway.GetShopStatusAsync(id, Ct))!;
+        Assert.Equal(new ShopStatus(false, KubeGateway.ChangePendingReason, null, $"https://{id}.shops.localhost", 2), stale);
+        Assert.Equal("Applying your change.", ReasonTexts.For(stale, 3));
+
+        await SetStatusAsync(2, 1); // the condition itself still from generation 1
+        Assert.False((await gateway.GetShopStatusAsync(id, Ct))!.Ready);
+
+        await SetStatusAsync(2, 2);
+        Assert.True((await gateway.GetShopStatusAsync(id, Ct))!.Ready);
+    }
 }

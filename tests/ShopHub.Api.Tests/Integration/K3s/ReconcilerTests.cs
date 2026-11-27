@@ -246,7 +246,8 @@ public sealed class ReconcilerTests(K3sCluster cluster, PostgresContainer db)
         Assert.Equal(version, await ResourceVersionAsync("shops", stray));
         Assert.DoesNotContain(_recorder.Requests, r => r.PathAndQuery.Contains(stray, StringComparison.Ordinal));
         AssertOnlyNamedApplies();
-        await cluster.Admin.CustomObjects.DeleteNamespacedCustomObjectAsync(Group, Version, Shops, "shops", stray, cancellationToken: Ct);
+        // The production delete guard (spec 005 D-4) refuses a bare delete; annotate first as ShopHub does.
+        await cluster.DeleteShopAsAdminAsync(stray, Ct);
     }
 
     /// <summary>
@@ -324,7 +325,10 @@ public sealed class ReconcilerTests(K3sCluster cluster, PostgresContainer db)
                 ("DELETE", $"wallets/{record.Id}-w2"),
             ],
             requests.Where(r => r.Method == "DELETE"));
-        Assert.All(requests, r => Assert.True(r.Method is "DELETE" or "GET", r.Method));
+        // Spec 005 D-4: the Shop is annotated (one PATCH, by name) right before its DELETE.
+        Assert.Equal([("PATCH", $"shops/{record.Id}")], requests.Where(r => r.Method == "PATCH"));
+        Assert.Equal(requests.IndexOf(("PATCH", $"shops/{record.Id}")) + 1, requests.IndexOf(("DELETE", $"shops/{record.Id}")));
+        Assert.All(requests, r => Assert.True(r.Method is "DELETE" or "GET" or "PATCH", r.Method));
         Assert.All(_recorder.Requests, r => Assert.DoesNotContain("labelSelector", r.PathAndQuery, StringComparison.OrdinalIgnoreCase));
         Assert.All(requests, r => Assert.Equal(2, r.Item2.Split('/').Length)); // <plural>/<name>: never a collection
     }

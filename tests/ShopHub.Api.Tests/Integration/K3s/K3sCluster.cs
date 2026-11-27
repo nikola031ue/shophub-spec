@@ -8,8 +8,10 @@ namespace ShopHub.Api.Tests.Integration.K3s;
 
 /// <summary>
 /// A real API server (k3s, same Kubernetes minor as Docker Desktop) with the shop-operator CRDs from
-/// the pinned chart, namespaces <c>shops</c>, <c>shophub</c> and <c>elsewhere</c>, and ShopHub's
-/// ServiceAccount bound to the delivery.md Role. No operator runs: statuses are set by the tests.
+/// the pinned chart, namespaces <c>shops</c>, <c>shophub</c> and <c>elsewhere</c>, ShopHub's
+/// ServiceAccount bound to the delivery.md Role, and the shop-operator chart's Shop delete guard
+/// (spec 005 D-4) bound to the whole shops namespace as in production. No operator runs: statuses
+/// are set by the tests.
 /// </summary>
 public sealed class K3sCluster : IAsyncLifetime
 {
@@ -69,12 +71,88 @@ public sealed class K3sCluster : IAsyncLifetime
             }
         }
 
+        foreach (var obj in Documents("shop-delete-guard.yaml").Select(d => KubernetesYaml.LoadAllFromString(d).Single()))
+        {
+            switch (obj)
+            {
+                case V1ValidatingAdmissionPolicy policy:
+                    await Admin.AdmissionregistrationV1.CreateValidatingAdmissionPolicyAsync(policy);
+                    break;
+                case V1ValidatingAdmissionPolicyBinding binding:
+                    await Admin.AdmissionregistrationV1.CreateValidatingAdmissionPolicyBindingAsync(binding);
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unexpected object in shop-delete-guard.yaml: {obj.GetType().Name}");
+            }
+        }
+
         var token = await Admin.CoreV1.CreateNamespacedServiceAccountTokenAsync(
             new Authenticationv1TokenRequest { Spec = new V1TokenRequestSpec { ExpirationSeconds = 3600 } },
             ServiceAccount, ShopHubNamespace);
         _token = token.Status.Token;
 
         await WaitForCrdsAsync();
+        await WaitForDeleteGuardAsync();
+    }
+
+    /// <summary>The annotation ShopHub writes before deleting a Shop (spec 005 D-4).</summary>
+    public const string DeleteRequested = "shophub.io/delete-requested";
+
+    /// <summary>
+    /// Deletes a Shop as cluster admin the way ShopHub does: annotate, then delete. A bare delete is
+    /// refused by the delete guard.
+    /// </summary>
+    public async Task DeleteShopAsAdminAsync(string name, CancellationToken ct)
+    {
+        var patch = new { metadata = new { annotations = new Dictionary<string, string> { [DeleteRequested] = "true" } } };
+        await Admin.CustomObjects.PatchNamespacedCustomObjectAsync(
+            new V1Patch(patch, V1Patch.PatchType.MergePatch), "shophub.io", "v1alpha1", ShopsNamespace, "shops", name, cancellationToken: ct);
+        await Admin.CustomObjects.DeleteNamespacedCustomObjectAsync("shophub.io", "v1alpha1", ShopsNamespace, "shops", name, cancellationToken: ct);
+    }
+
+    /// <summary>
+    /// Admission policies take a moment to be enforced: wait until a bare delete of a probe Shop is
+    /// refused, then remove the probe the allowed way.
+    /// </summary>
+    private async Task WaitForDeleteGuardAsync()
+    {
+        const string probe = "guard-probe";
+        await Admin.CustomObjects.CreateNamespacedCustomObjectAsync(new Dictionary<string, object>
+        {
+            ["apiVersion"] = "shophub.io/v1alpha1",
+            ["kind"] = "Shop",
+            ["metadata"] = new Dictionary<string, object> { ["name"] = probe },
+            ["spec"] = new Dictionary<string, object>
+            {
+                ["shopName"] = "Guard probe",
+                ["availability"] = "standard",
+                ["database"] = "standard",
+                ["walletRef"] = new Dictionary<string, object> { ["name"] = probe },
+                ["discordChannelRef"] = new Dictionary<string, object> { ["name"] = probe },
+            },
+        }, "shophub.io", "v1alpha1", ShopsNamespace, "shops");
+
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await Admin.CustomObjects.DeleteNamespacedCustomObjectAsync(
+                    "shophub.io", "v1alpha1", ShopsNamespace, "shops", probe, dryRun: "All");
+            }
+            catch (k8s.Autorest.HttpOperationException e) when (e.Response.Content.Contains("delete-requested", StringComparison.Ordinal))
+            {
+                break; // refused: the guard is live
+            }
+
+            if (attempt >= 60)
+            {
+                throw new InvalidOperationException("The Shop delete guard never became active.");
+            }
+
+            await Task.Delay(500);
+        }
+
+        await DeleteShopAsAdminAsync(probe, CancellationToken.None);
     }
 
     public async ValueTask DisposeAsync() => await _container.DisposeAsync();
